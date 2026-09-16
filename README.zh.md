@@ -188,7 +188,7 @@ tier-router:
 | --- | --- | --- |
 | `GET` | `/tier-router/api/models` | 全部 provider 的模型目录（图片能力、推理强度）+ 当前默认模型。 |
 | `GET` | `/tier-router/api/config` | 解析后的配置 + 默认值 + 是否可写。 |
-| `POST` | `/tier-router/api/config` | 写入单个字段（`{field, value}`）；`value: null` 恢复默认。 |
+| `POST` | `/tier-router/api/config` | 写入单个字段（`{field, value}`）；`value: null` 恢复默认。要求 `content-type: application/json` 且 `Origin`/`Host` 同源，因此你随便访问的网页无法改写路由配置。 |
 | `GET` | `/tier-router/api/stats` | 路由计数与最近失败。 |
 
 客户端半边通过这套 API 而不是 settings wire 读写：宿主只向配置类客户端暴露白名单命名空间。

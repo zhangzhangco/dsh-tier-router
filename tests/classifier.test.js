@@ -99,3 +99,26 @@ test('classifier prompt exists and names three tiers', () => {
   assert.ok(CLASSIFIER_SYSTEM_PROMPT.includes('normal'))
   assert.ok(CLASSIFIER_SYSTEM_PROMPT.includes('easy'))
 })
+
+// ---------- ASCII keywords must not match inside other words ----------
+
+test('classifyDifficulty: "hi"/"ok" do not fire inside this/which/look', () => {
+  // These three used to score a bogus social signal (hi∈this, hi∈which,
+  // ok∈look), drop the score by one and route to the easy tier.
+  assert.equal(classifyDifficulty('which one?').level, 'normal')
+  assert.equal(classifyDifficulty('this is broken').level, 'normal')
+  assert.equal(classifyDifficulty('look at the logs').level, 'normal')
+})
+
+test('classifyDifficulty: genuine small talk still lands on easy', () => {
+  for (const text of ['hi', 'ok', 'okay', 'thanks!', '你好', '好的', '继续']) {
+    assert.equal(classifyDifficulty(text).level, 'easy', `"${text}" should be easy`)
+  }
+})
+
+test('classifyDifficulty: inflected english keywords still count', () => {
+  // The leading boundary must not break stems: running→run, tests→test.
+  assert.equal(classifyDifficulty('running the tests now').level, 'normal')
+  assert.equal(classifyDifficulty('testing the new parser').level, 'normal')
+  assert.notEqual(classifyDifficulty('refactoring this module').level, 'easy')
+})

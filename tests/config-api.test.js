@@ -4,10 +4,13 @@ import { installModelsApi } from '../lib/models-api.js'
 import { DEFAULTS } from '../lib/schema.js'
 
 /** Minimal Node http req/res fakes for the webServer handler. */
-function fakeReq(method, path, body) {
+function fakeReq(method, path, body, headers = {}) {
   return {
     method,
     url: path,
+    // The write route requires a JSON content type and a same-origin Host;
+    // individual tests override these to exercise the rejections.
+    headers: { 'content-type': 'application/json', host: '127.0.0.1:3080', ...headers },
     on(event, cb) {
       if (event === 'data' && body !== undefined) {
         const buf = Buffer.from(JSON.stringify(body), 'utf8')
@@ -205,5 +208,43 @@ test('config POST allows unknown-capability models in the vision tier', async ()
   )
   assert.equal(res.status, 200)
   assert.equal(res.json.ok, true)
+  assert.equal(settings.writes.length, 1)
+})
+
+// ---------- the write route must not be CSRF-able ----------
+
+test('config POST rejects a non-JSON content type (a CORS "simple" request)', async () => {
+  const settings = fakeSettings({ easyProvider: 'gpudev', easyModel: 'qwen3.8-27b-q5' })
+  const { captured } = visionCtx(settings, ['text', 'image'])
+  const res = await invoke(
+    captured.handler,
+    fakeReq('POST', '/tier-router/api/config', { field: 'easyModel', value: 'attacker-model' }, { 'content-type': 'text/plain' }),
+    fakeRes(),
+  )
+  assert.equal(res.status, 415)
+  assert.equal(settings.writes.length, 0, 'a text/plain write must never reach settings')
+})
+
+test('config POST rejects a cross-origin request even with a JSON content type', async () => {
+  const settings = fakeSettings({ easyProvider: 'gpudev', easyModel: 'qwen3.8-27b-q5' })
+  const { captured } = visionCtx(settings, ['text', 'image'])
+  const res = await invoke(
+    captured.handler,
+    fakeReq('POST', '/tier-router/api/config', { field: 'easyModel', value: 'attacker-model' }, { origin: 'https://evil.example' }),
+    fakeRes(),
+  )
+  assert.equal(res.status, 403)
+  assert.equal(settings.writes.length, 0)
+})
+
+test("config POST still accepts the settings card's own same-origin request", async () => {
+  const settings = fakeSettings({ easyProvider: 'gpudev', easyModel: 'qwen3.8-27b-q5' })
+  const { captured } = visionCtx(settings, ['text', 'image'])
+  const res = await invoke(
+    captured.handler,
+    fakeReq('POST', '/tier-router/api/config', { field: 'easyModel', value: 'qwen3.8-27b-q5' }, { origin: 'http://127.0.0.1:3080' }),
+    fakeRes(),
+  )
+  assert.equal(res.status, 200)
   assert.equal(settings.writes.length, 1)
 })

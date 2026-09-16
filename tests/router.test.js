@@ -753,3 +753,104 @@ test('stream: a request answered by its own tier does not count as a fallback', 
   await collect(router.stream(optionsFor('重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整')))
   assert.equal(stats.snapshot().fallback, 0)
 })
+
+// ---------- review fixes: estimator reach, fallback flag, window retry ----------
+
+test('estimatePromptTokens: counts text nested inside tool-result blocks', () => {
+  const payload = 'x'.repeat(14000) // ~4000 tokens
+  const nested = [{ role: 'user', content: [{ type: 'tool-result', content: [{ type: 'text', text: payload }] }] }]
+  const flat = [{ role: 'user', content: [{ type: 'text', text: payload }] }]
+  // Tool output is usually the bulk of a long coding session; counting it as a
+  // flat allowance under-estimated real histories by >10x.
+  assert.equal(estimatePromptTokens(nested), estimatePromptTokens(flat))
+  assert.ok(estimatePromptTokens(nested) > 3900, 'nested tool output must not be free')
+})
+
+test('estimatePromptTokens: counts tool-call arguments', () => {
+  const block = { type: 'tool-call', name: 'write', arguments: { path: '/tmp/x', body: 'y'.repeat(7000) } }
+  assert.ok(estimatePromptTokens([{ role: 'assistant', content: [block] }]) > 1800)
+})
+
+test('estimatePromptTokens: an unknown block kind keeps a flat allowance', () => {
+  assert.equal(estimatePromptTokens([{ role: 'user', content: [{ type: 'mystery' }] }]), 72)
+})
+
+test('stream: a structural chunk before a yielded error still falls back', async () => {
+  // Adapters emit block-start before their first delta. Treating that as
+  // "output produced" silently disabled the fallback chain.
+  const calls = []
+  const llm = {
+    async prepareCall(config) {
+      calls.push(`${config.provider}/${config.model}`)
+      return {
+        config: { provider: config.provider, model: config.model },
+        async *stream() {
+          if (config.model === 'first') {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'finish', reason: { kind: 'error', failure: { message: 'boom', code: 'TRANSPORT' } } }
+            return
+          }
+          yield { type: 'text-delta', index: 0, text: 'answered by the fallback tier' }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      }
+    },
+  }
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'p', hardModel: 'first',
+    normalProvider: 'p', normalModel: 'second',
+  }), { stats: createStats() })
+  const chunks = await collect(router.stream(optionsFor('重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整')))
+  assert.deepEqual(calls, ['p/first', 'p/second'], 'the chain must advance past a pre-output failure')
+  assert.ok(chunks.some((c) => c.type === 'text-delta' && c.text === 'answered by the fallback tier'))
+})
+
+test('stream: a failure after real output does NOT fall back (no duplicated output)', async () => {
+  const calls = []
+  const llm = {
+    async prepareCall(config) {
+      calls.push(`${config.provider}/${config.model}`)
+      return {
+        config: { provider: config.provider, model: config.model },
+        async *stream() {
+          yield { type: 'text-delta', index: 0, text: 'partial answer' }
+          yield { type: 'finish', reason: { kind: 'error', failure: { message: 'died mid-stream', code: 'TRANSPORT' } } }
+        },
+      }
+    },
+  }
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'p', hardModel: 'first',
+    normalProvider: 'p', normalModel: 'second',
+  }), { stats: createStats() })
+  const chunks = await collect(router.stream(optionsFor('重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整')))
+  assert.deepEqual(calls, ['p/first'], 'must not retry after partial output')
+  assert.ok(chunks.some((c) => c.type === 'text-delta' && c.text === 'partial answer'))
+})
+
+test('contextWindowOf: a transient failure is retried, a known window is not', async () => {
+  let attempts = 0
+  let window
+  const llm = {
+    async resolveModelInfo() {
+      attempts += 1
+      if (window === undefined) throw new Error('provider not ready')
+      return { context: { contextWindow: window } }
+    },
+  }
+  const router = new TierRouterAdapter({ get: () => undefined, llm, logger: { info: () => {} } }, () => settings({}))
+  assert.equal(await router.contextWindowOf('p', 'm'), undefined)
+  assert.equal(await router.contextWindowOf('p', 'm'), undefined)
+  assert.equal(attempts, 1, 'an unknown window is cached briefly, not resolved per call')
+  // After the retry window lapses the lookup runs again and the guard engages.
+  router.contextWindows.get('p/m').at = Date.now() - 120_000
+  window = 131_072
+  assert.equal(await router.contextWindowOf('p', 'm'), 131_072)
+  assert.equal(attempts, 2)
+  // A resolved window is stable: no further metadata calls.
+  window = 999
+  assert.equal(await router.contextWindowOf('p', 'm'), 131_072)
+  assert.equal(attempts, 2)
+})

@@ -210,7 +210,7 @@ The settings card talks to these host endpoints:
 | --- | --- | --- |
 | `GET` | `/tier-router/api/models` | Model catalog for every provider (image support, reasoning efforts) + current default model. |
 | `GET` | `/tier-router/api/config` | Resolved settings + defaults + writability. |
-| `POST` | `/tier-router/api/config` | Write one field (`{field, value}`); `value: null` resets it. |
+| `POST` | `/tier-router/api/config` | Write one field (`{field, value}`); `value: null` resets it. Requires `content-type: application/json` and a same-origin `Origin`/`Host` pair, so a page you merely visit cannot rewrite the routing. |
 | `GET` | `/tier-router/api/stats` | Route counters and recent failures. |
 
 The client half reads and writes through this API rather than the settings wire, because the host only

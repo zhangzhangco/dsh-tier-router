@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.1 — review fixes (not yet published)
+
+Four defects found by reading the code, all with regression tests (99 → 111).
+
+### Fixed
+
+- **The context guard could not see tool output, so it under-estimated exactly the sessions it
+  exists to protect.** `estimatePromptTokens` read only top-level text/image blocks and charged a
+  flat 64 tokens for anything else — including `tool-result`, whose payload lives in a NESTED
+  content array. A 14,000-character tool result was counted as 157 tokens instead of 4,035 (26×
+  low); since tool output is usually the bulk of a long coding session, the guard would let a
+  180k-token history through to a 128k model — the very failure it was built to prevent. The
+  estimator now recurses into nested content and counts tool-call arguments.
+- **A structural chunk silently disabled the fallback chain.** `delegate` marked `produced = true`
+  for *any* chunk, but adapters emit `block-start` before their first delta: an adapter that opened
+  a block and then failed with a yielded `finish/error` was treated as having already produced
+  output, so the chain stopped and the raw provider error surfaced instead of the next tier
+  answering. `produced` now tracks content-bearing chunks only (partial output is still never
+  retried, so nothing is duplicated).
+- **The config write route was CSRF-able.** `POST /tier-router/api/config` is reachable without the
+  GUI token and accepted any content type, so a `text/plain` POST — a CORS "simple" request that
+  needs no preflight — from any page in the browser could rewrite the routing. It now requires
+  `content-type: application/json` (which forces a preflight the server never approves) and
+  rejects a mismatched `Origin`/`Host` pair.
+- **ASCII keywords matched inside other words.** The heuristic classifier used `includes()`, so
+  `hi` fired inside "this"/"which"/"high" and `ok` inside "look"/"book", subtracting a score point
+  and routing ordinary requests like "this is broken" to the easy tier. ASCII keywords now need a
+  leading word boundary (the 1–2 letter ones also a trailing one), while CJK keeps substring
+  matching and inflections still count (`tests`, `running`, `refactoring`).
+
+### Changed
+
+- A failed context-window lookup is no longer cached for the whole session: an unknown window is
+  used for a minute before being re-resolved, so a transient provider hiccup cannot permanently
+  disable the guard for that route.
+
+
 All notable changes to `dsh-tier-router` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
