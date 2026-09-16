@@ -149,6 +149,47 @@ tier-router:
 - `@deepseek-ai/schemastery` `^3.18.2`
 - 客户端半边向 `settings.section` 贡献一项，因此仅在 `platform: web` 下加载。
 
+## 已知限制与兼容性
+
+用之前值得知道：
+
+- **视觉侧车有缓存，但不是免费的。** 只要历史里含图片，每次请求都会调用（或复用缓存调用）视觉模型。
+  证据按附件缓存 `visionCacheTtl` 秒（默认 1 小时），过期后同一张历史图片会在下次请求时**重新分析**。
+  设 `visionCacheTtl: 0` 可关闭缓存。
+- **历史里只要有过图片，后续请求都按含图处理。** 这是有意为之（否则纯文本档位模型会拒绝整段历史），
+  且 `replace` 模式下仍由难度档位作答、视觉模型只提供证据。但一个曾经贴过截图的会话，会一直为视觉证据
+  付费，直到那一轮离开对话历史。
+- **启发式偏保守。** 判定「困难」需要累计得分 ≥ 3；只出现两个硬关键词会落到「一般」。
+  可以重设档位，或把 `classifier` 切成 `llm`。
+- **只有你主动选中它时才会路由。** 它只处理**经由 `smart` 模型**发出的请求，是按会话 opt-in 的。
+- **不要和「强制改写模型」的插件同时启用**（例如在 `agent/request` 瀑布里 `await next()` 之后打戳、
+  按角色分配 planner/executor 模型的插件）。那类插件优先级高于模型选择器，本插件将永远收不到请求。二选一。
+- **依赖是 peer。** `@deepseek-ai/dsh-llm`、`dsh-settings`、`cordis` 来自 DSH 安装本身；
+  本包唯一自带的依赖是 `@deepseek-ai/schemastery`。
+
+## 开发
+
+```sh
+git clone https://github.com/zhangzhangco/dsh-tier-router
+cd dsh-tier-router
+npm install --legacy-peer-deps   # 拉取公开的 @deepseek-ai/* peer
+npm test                         # 85 个用例，node:test，无测试框架
+```
+
+`npm test` 使用 Node 内置测试运行器（`node --test`，自动发现）。注意上游文档里的
+`node --test tests/` 在 Node 22.23 上**不可用** —— 它会把目录当成模块路径并抛 `MODULE_NOT_FOUND`。
+
+想在 profile 里跑本地 checkout 而不是已发布包：
+
+```sh
+dsh plugin --profile web remove dsh-tier-router
+dsh plugin --profile web add link:/绝对路径/dsh-tier-router
+```
+
+目录结构：`index.js`（bundle 入口）、`lib/{schema,router,classifier,vision,models-api}.js`、
+`lib/types/index.d.ts`（手写 TypeScript 声明）、`client/client.js`（设置卡片，无构建步骤的
+`window.__ModuleLoader__` bundle）、`cordis.patch.yml`（bundle 层）、`tests/`。
+
 ## 致谢
 
 本项目改编自 [dsh-smart-router](https://github.com/rouyiemei/dsh-smart-router)（MIT）：

@@ -165,6 +165,53 @@ exposes allow-listed namespaces to configuration clients.
 - `@deepseek-ai/schemastery` `^3.18.2`
 - The client half contributes a `settings.section` entry and therefore loads only on `platform: web`.
 
+## Limitations and compatibility
+
+Worth knowing before you rely on it:
+
+- **The vision sidecar is cached, not free.** Every request whose history contains an image calls
+  (or reuses a cached call to) the vision model. Evidence is cached per attachment for
+  `visionCacheTtl` seconds (default 1h); after that the same historical image is analysed again on
+  the next request. Set `visionCacheTtl: 0` to disable the cache.
+- **An image anywhere in the history keeps the request image-bearing.** That is deliberate (a
+  text-only tier model would otherwise reject the whole history), and in `replace` mode the
+  difficulty tiers still produce the answer — the vision model only supplies evidence. But a long
+  session that once had a screenshot keeps paying for vision evidence until that turn leaves the
+  conversation.
+- **The heuristic is conservative.** A hard verdict needs a score of 3 or more; two hard keywords
+  alone land at `normal`. Retarget the tiers, or switch `classifier` to `llm`.
+- **This router only acts when you select it.** It routes requests made *through* the `smart` model,
+  so it is opt-in per session.
+- **Do not run it together with a plugin that force-overrides the model** on the `agent/request`
+  waterfall (role-based routers that stamp planner/executor models after `await next()`). Such a
+  plugin outranks the model selector, so Tier Router would never receive a request. Pick one.
+- **Dependencies are peers.** `@deepseek-ai/dsh-llm`, `dsh-settings` and `cordis` come from the DSH
+  installation; the only bundled dependency is `@deepseek-ai/schemastery`.
+
+## Development
+
+```sh
+git clone https://github.com/zhangzhangco/dsh-tier-router
+cd dsh-tier-router
+npm install --legacy-peer-deps   # pulls the public @deepseek-ai/* peers
+npm test                         # 85 cases, node:test, no test framework
+```
+
+`npm test` runs Node's built-in runner (`node --test`, auto-discovery). Note that
+`node --test tests/` — the form upstream documented — does not work on Node 22.23: it treats the
+directory as a module path and exits with `MODULE_NOT_FOUND`.
+
+To run the checkout in a profile instead of the published package:
+
+```sh
+dsh plugin --profile web remove dsh-tier-router
+dsh plugin --profile web add link:/absolute/path/to/dsh-tier-router
+```
+
+Layout: `index.js` (bundle entry), `lib/{schema,router,classifier,vision,models-api}.js`,
+`lib/types/index.d.ts` (hand-written TypeScript declarations), `client/client.js` (the settings card,
+a build-free `window.__ModuleLoader__` bundle), `cordis.patch.yml` (the bundle layer), `tests/`.
+
 ## Credits
 
 This package is adapted from [dsh-smart-router](https://github.com/rouyiemei/dsh-smart-router) (MIT):

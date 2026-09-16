@@ -34,9 +34,9 @@ window.__ModuleLoader__.load({
 
     // ---------- locale ----------
     const zh = {
-      nav: 'Tier Router',
+      nav: '智能路由',
       intro:
-        '把虚拟模型「Tier Router（自动路由）」选为会话模型后，每次请求都会自动分类：' +
+        '把虚拟模型「Tier Router (auto)」选为会话模型后，每次请求都会自动分类：' +
         '图片/截图 → 视觉档；其余按难度 → 困难/一般/简单档。各档模型从「设置 → 模型」已配置的模型中选取。',
       sameVendor:
         '提示：建议三个难度档选择同一供应商的同一系列模型（如同一家的 pro/flash 版），' +
@@ -93,7 +93,7 @@ window.__ModuleLoader__.load({
       loadError: '加载失败',
       saveError: '保存失败',
       saving: '保存中…',
-      readOnly: '当前设置为只读，无法保存',
+      readOnly: 'Settings are read-only; changes cannot be saved',
     }
     const en = {
       nav: 'Tier Router',

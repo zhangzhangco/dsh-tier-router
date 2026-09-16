@@ -11,7 +11,7 @@
 import {
   DEFAULTS, MODEL, NAMESPACE, PROVIDER, SETTINGS_SCHEMA,
 } from './lib/schema.js'
-import { SmartRouterAdapter, createStats } from './lib/router.js'
+import { TierRouterAdapter, createStats } from './lib/router.js'
 import { installModelsApi } from './lib/models-api.js'
 
 /** Cordis plugin name. */
@@ -26,7 +26,7 @@ export const inject = ['llm']
 export function apply(ctx, config) {
   const entry = { ...DEFAULTS, ...(config ?? {}) }
   const stats = createStats()
-  const router = new SmartRouterAdapter(ctx, () => source(), { stats })
+  const router = new TierRouterAdapter(ctx, () => source(), { stats })
 
   // Settings: schema defaults ← entry base ← user section (live source).
   // `installSection` is the local dsh-settings API (0.1.5-rc.2): it registers
