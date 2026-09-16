@@ -59,6 +59,12 @@ export interface TierRouterSettings {
   /** Classifier model for `classifier: 'llm'`; empty means "reuse the easy tier". */
   llmClassifierProvider: string
   llmClassifierModel: string
+  /**
+   * Skip a route whose *known* context window cannot hold the estimated
+   * request length. Models with an unknown window are never skipped, and the
+   * guard never empties a chain (a routable request stays routable).
+   */
+  contextGuard: boolean
 }
 
 /** Settings namespace owned by this plugin. */

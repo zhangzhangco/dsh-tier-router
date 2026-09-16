@@ -4,6 +4,29 @@ All notable changes to `dsh-tier-router` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-16
+
+Answering "which model did it actually use, and what happens when the session outgrows a tier?".
+
+### Added
+
+- **Recent routing decisions** in the settings card and on `GET /tier-router/api/stats`
+  (`decisions`): a bounded 20-entry ring recording, per request, the model that answered, the
+  classified tier, the estimated request size, the routes tried before it, and why that route won.
+  Previously the only record was a `ctx.logger.info` line that this deployment does not surface
+  anywhere, so the choice was effectively invisible.
+- **`contextGuard`** (default on): before delegating, each candidate route's context window is
+  resolved through `resolveModelInfo` and routes whose *known* window is smaller than the estimated
+  request size are skipped, so a 180k-token session is no longer handed to a 131k-token model.
+  Unknown windows always pass, and the guard never empties a chain.
+- `estimatePromptTokens` / `textTokens`: a tokenizer-free request-size estimate (~1 token per CJK
+  character, ~3.5 characters per token otherwise, a fixed allowance per image, 10% headroom),
+  deliberately biased to over-estimate.
+- Context windows in the model catalog and in the picker labels (`qwen3.8-27b-q5 · 131k ctx`), so a
+  tier's ceiling is visible while configuring it.
+- 7 more tests (92 total) covering the estimator, the skip, unknown windows, fail-open, the
+  `contextGuard: false` escape hatch, and the decision ring.
+
 ## [0.1.1] - 2026-09-16
 
 Engineering-debt pass: the pieces the 0.1.0 adaptation left behind upstream.

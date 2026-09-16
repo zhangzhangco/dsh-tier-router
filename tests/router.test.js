@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { TierRouterAdapter, createStats, lastUserMessage, blocksText, failureChunk } from '../lib/router.js'
+import {
+  TierRouterAdapter, createStats, estimatePromptTokens, lastUserMessage, blocksText, failureChunk,
+} from '../lib/router.js'
 import { DEFAULTS } from '../lib/schema.js'
 
 /**
@@ -586,4 +588,114 @@ test('stream: an adapter failing before any output falls back to the next route'
   assert.equal(llm.calls.length, 2)
   assert.equal(stats.snapshot().errors.length, 1)
   assert.equal(stats.snapshot().errors[0].target, 'deepseek-official/deepseek-v4-pro')
+})
+
+// ---------- context guard: a small-window model must not be handed a long session ----------
+
+test('estimatePromptTokens: CJK counts heavier than Latin, images add a fixed cost', () => {
+  assert.equal(estimatePromptTokens([]), 0)
+  const latin = estimatePromptTokens([{ role: 'user', content: [{ type: 'text', text: 'a'.repeat(350) }] }])
+  const cjk = estimatePromptTokens([{ role: 'user', content: [{ type: 'text', text: '好'.repeat(350) }] }])
+  assert.ok(latin < 200, `350 Latin chars should stay well under 200 tokens, got ${latin}`)
+  assert.ok(cjk > 300, `350 CJK chars should approach 1 token each, got ${cjk}`)
+  const withImage = estimatePromptTokens([{ role: 'user', content: [{ type: 'image', attachment: { id: 'x' } }] }])
+  assert.ok(withImage >= 800, 'an image block costs a fixed allowance')
+})
+
+test('resolveChain: a route whose known window is too small is skipped', async () => {
+  const windows = { 'small/model': 1000, 'big/model': 200000, 'tier-router/smart': undefined }
+  const ctx = {
+    get: () => undefined,
+    llm: {
+      prepareCall: async () => { throw new Error('unused') },
+      resolveModelInfo: async (provider, model) => {
+        const window = windows[`${provider}/${model}`]
+        return window === undefined ? {} : { context: { contextWindow: window } }
+      },
+    },
+  }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    easyProvider: 'small', easyModel: 'model',
+    normalProvider: 'big', normalModel: 'model',
+  }))
+  // A long body pushes the estimate past the small model's window.
+  const resolved = await router.resolveChain(optionsFor('请帮我重构这段代码 '.repeat(400)))
+  const targets = resolved.chain.map((c) => `${c.provider}/${c.model}`)
+  assert.ok(!targets.includes('small/model'), `small model must be skipped, got ${targets.join(',')}`)
+  assert.deepEqual(resolved.skipped.map((s) => `${s.provider}/${s.model}`), ['small/model'])
+  assert.ok(resolved.estimate > 1000)
+})
+
+test('resolveChain: unknown context windows are never treated as too small', async () => {
+  const ctx = {
+    get: () => undefined,
+    llm: {
+      prepareCall: async () => { throw new Error('unused') },
+      resolveModelInfo: async () => { throw new Error('no metadata for this provider') },
+    },
+  }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    easyProvider: 'mystery', easyModel: 'unknown',
+  }))
+  const resolved = await router.resolveChain(optionsFor('请帮我重构这段代码 '.repeat(400)))
+  assert.deepEqual(resolved.chain.map((c) => `${c.provider}/${c.model}`), ['mystery/unknown'])
+  assert.deepEqual(resolved.skipped, [])
+})
+
+test('resolveChain: the guard never empties a chain (fail-open)', async () => {
+  const ctx = {
+    get: () => undefined,
+    llm: {
+      prepareCall: async () => { throw new Error('unused') },
+      resolveModelInfo: async () => ({ context: { contextWindow: 100 } }),
+    },
+  }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    easyProvider: 'tiny', easyModel: 'model',
+    hardProvider: 'tiny2', hardModel: 'model',
+  }))
+  const resolved = await router.resolveChain(optionsFor('长文本 '.repeat(500)))
+  assert.ok(resolved.chain.length > 0, 'a routable request must never become "no route"')
+})
+
+test('resolveChain: contextGuard=false disables the skip entirely', async () => {
+  const ctx = {
+    get: () => undefined,
+    llm: {
+      prepareCall: async () => { throw new Error('unused') },
+      resolveModelInfo: async () => ({ context: { contextWindow: 100 } }),
+    },
+  }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    contextGuard: false,
+    easyProvider: 'tiny', easyModel: 'model',
+  }))
+  const resolved = await router.resolveChain(optionsFor('长文本 '.repeat(500)))
+  assert.deepEqual(resolved.chain.map((c) => `${c.provider}/${c.model}`), ['tiny/model'])
+  assert.deepEqual(resolved.skipped, [])
+})
+
+test('stats: decisions record which model answered, and what was skipped', () => {
+  const stats = createStats()
+  stats.recordDecision({
+    kind: 'text', level: 'normal', provider: 'codex-local', model: 'gpt-5.5',
+    reason: 'normal tier', estimate: 181000, skipped: ['gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))'],
+  })
+  stats.recordDecision({ kind: 'text', level: 'easy', outcome: 'failed', reason: 'every route failed', tried: ['a/b'] })
+  const { decisions } = stats.snapshot()
+  assert.equal(decisions.length, 2)
+  assert.equal(decisions[0].provider, 'codex-local')
+  assert.equal(decisions[0].model, 'gpt-5.5')
+  assert.equal(decisions[0].estimate, 181000)
+  assert.match(decisions[0].skipped[0], /131072/)
+  assert.equal(decisions[1].outcome, 'failed')
+  assert.deepEqual(decisions[1].tried, ['a/b'])
+})
+
+test('stats: the decision ring is bounded', () => {
+  const stats = createStats()
+  for (let i = 0; i < 30; i += 1) stats.recordDecision({ provider: `p${i}`, model: `m${i}` })
+  const { decisions } = stats.snapshot()
+  assert.equal(decisions.length, 20)
+  assert.equal(decisions.at(-1).provider, 'p29')
 })

@@ -72,6 +72,54 @@ dsh plugin --profile web add github:zhangzhangco/dsh-tier-router
 > Set the four tiers to your own models. Tiers left empty are skipped automatically and the request
 > falls back — nothing breaks.
 
+## How do I see which model was chosen?
+
+Open **Settings → Tier Router**. Below the counters, **Recent routing decisions** lists the last 20
+requests, newest first, each showing the model that answered, the classified tier, the estimated
+request size, and why that route won:
+
+```
+21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok  ·  hard tier
+21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok  ·  easy tier
+21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok  ·  normal tier  ·  skipped (window too small) gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
+```
+
+The `skipped` note is the context guard at work: that tier was passed over because its model could not
+hold the request. The same data is on the stats endpoint:
+
+```sh
+curl -s localhost:3080/tier-router/api/stats | python3 -m json.tool
+```
+
+`decisions` is a bounded in-memory ring (20 entries) — it resets when the server restarts, and it
+records the router's own view, not a billed token count.
+
+## Long sessions and small-context models
+
+A session grows, and a model that answered an early turn may no longer fit the current history — the
+classic failure is a local `llama.cpp` endpoint with a 131k window handed a 180k-token conversation:
+
+```
+400: request (180612 tokens) exceeds the available context size (131072 tokens)
+```
+
+`contextGuard` (on by default) handles that **before** the request is sent. For every candidate route
+the router resolves the model's context window (`resolveModelInfo().context.contextWindow`) and skips
+any route whose **known** window is smaller than the estimated request size, so the ladder falls
+through to a model that fits. Three properties matter:
+
+- **Unknown windows never block.** A provider that reports no window is always a candidate; the guard
+  only ever drops a model whose limits it actually knows.
+- **It never empties a chain.** If every route would be skipped, the original chain is used unchanged —
+  a routable request can never become "no route".
+- **It is an estimate.** The request size is approximated as ~1 token per CJK character and ~3.5
+  characters per token elsewhere (images add a fixed allowance), with 10% headroom. It is deliberately
+  biased to over-estimate, because guessing low sends a request a model cannot hold.
+
+Set `contextGuard: false` to route purely by difficulty and tier order. The model pickers also show
+each model's window (`qwen3.8-27b-q5 · 131k ctx`), so you can see which tiers can hold a long session
+when you configure them.
+
 ## Configuration
 
 Settings live in the `tier-router` namespace as flat fields. Edit them in the settings card or write
@@ -115,6 +163,7 @@ tier-router:
 | `visionFallbacks` | `[]` | Explicit vision fallbacks before the default model. |
 | `fallbackProvider` / `fallbackModel` | `''` | Route used when no tier is configured; empty = session default. |
 | `llmClassifierProvider` / `llmClassifierModel` | `''` | Classifier model for `classifier: llm`. |
+| `contextGuard` | `true` | Skip routes whose known context window cannot hold the request. |
 
 ## How routing works
 

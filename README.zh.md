@@ -62,6 +62,47 @@ dsh plugin --profile web add github:zhangzhangco/dsh-tier-router
 > 本仓库内的默认值指向作者自己的本地路由（`codex-local`、`gpudev`）。请把四个档位改成你自己的模型。
 > 留空的档位会被自动跳过并回退，不会让请求失败。
 
+## 我怎么知道它选了哪个模型？
+
+打开 **设置 → Tier Router**。计数器下方是 **最近路由决策**，列出最近 20 次请求（最新在上），
+每条都显示：实际作答的模型、判定的档位、本次请求的估算长度、以及为什么走这条路由：
+
+```
+21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok  ·  hard tier
+21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok  ·  easy tier
+21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok  ·  normal tier  ·  跳过（上下文不够） gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
+```
+
+其中「跳过」就是上下文感知在起作用：那一档因为模型装不下本次请求而被略过。同样的数据也在 stats 接口上：
+
+```sh
+curl -s localhost:3080/tier-router/api/stats | python3 -m json.tool
+```
+
+`decisions` 是内存里的有界环形缓冲（20 条）——服务重启即清空，且它是**路由器自己的估算**，
+不是计费用的真实 token 数。
+
+## 长会话与小上下文模型
+
+会话会变长，早先能接住的模型，到后面可能就装不下当前历史了。典型故障是把 180k token 的对话
+交给一个 131k 窗口的本地 llama.cpp 端点：
+
+```
+400: request (180612 tokens) exceeds the available context size (131072 tokens)
+```
+
+`contextGuard`（默认开启）在**发请求之前**就处理这件事：对每个候选路由，路由器解析该模型的上下文窗口
+（`resolveModelInfo().context.contextWindow`），凡是**已知**窗口小于本次请求估算长度的路由一律跳过，
+于是阶梯会自动落到装得下的模型上。三个性质很重要：
+
+- **窗口未知的模型永不拦截。** 不上报窗口的 provider 始终是候选；守卫只会丢掉它确实知道上限的模型。
+- **绝不会把候选链清空。** 若所有路由都会被跳过，则原样使用原链 —— 本来能路由的请求绝不会变成“无路由”。
+- **它是估算。** 请求长度按「CJK 1 字 ≈ 1 token、其它 3.5 字符 ≈ 1 token」（图片另计固定额度）估算，
+  再留 10% 余量；且刻意偏向高估，因为估低了等于把装不下的请求发出去。
+
+设 `contextGuard: false` 可关闭，退回纯按难度与档位顺序路由。模型下拉里也会显示每个模型的窗口
+（`qwen3.8-27b-q5 · 131k ctx`），配置时就能看出哪一档撑得住长会话。
+
 ## 配置项
 
 设置位于 `tier-router` 命名空间，全部为扁平字段。可在设置卡片中编辑，也可直接写 YAML：
@@ -104,6 +145,7 @@ tier-router:
 | `visionFallbacks` | `[]` | 视觉档失败后、默认模型之前的显式回退。 |
 | `fallbackProvider` / `fallbackModel` | `''` | 所有档位都未配置时使用的路由；空 = 会话默认模型。 |
 | `llmClassifierProvider` / `llmClassifierModel` | `''` | `classifier: llm` 时使用的分类模型。 |
+| `contextGuard` | `true` | 跳过上下文窗口装不下本次请求的路由。 |
 
 ## 路由规则
 

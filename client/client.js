@@ -87,6 +87,14 @@ window.__ModuleLoader__.load({
       'stats.vision': '视觉档',
       'stats.visionBridge': '视觉分析',
       'stats.error': '错误',
+      decisions: '最近路由决策（每次请求选了哪个模型）',
+      'decisions.failed': '全部失败',
+      'decisions.tried': '先试过',
+      'decisions.skipped': '跳过（上下文不够）',
+      contextGuard: '上下文感知（跳过装不下的模型）',
+      'contextGuard.hint': '开启后，若某档位模型的上下文窗口小于本次请求的估算长度，会跳过它并改用装得下的档位；'
+        + '窗口未知的模型不会被跳过。估算按 CJK 1 字≈1 token、其它 3.5 字符≈1 token，并预留 10% 余量。',
+      'decisions.empty': '还没有请求经过路由器',
       defaultModel: '当前默认模型',
       empty: '（未配置）',
       loading: '加载中…',
@@ -152,6 +160,15 @@ window.__ModuleLoader__.load({
       'stats.vision': 'Vision tier',
       'stats.visionBridge': 'Vision analyses',
       'stats.error': 'Errors',
+      decisions: 'Recent routing decisions (which model handled each request)',
+      'decisions.failed': 'all routes failed',
+      'decisions.tried': 'tried',
+      'decisions.skipped': 'skipped (window too small)',
+      contextGuard: 'Context-aware routing (skip models that cannot hold the request)',
+      'contextGuard.hint': 'When on, a tier whose model context window is smaller than the estimated request '
+        + 'length is skipped in favour of a tier that fits. Models with an unknown window are never skipped. '
+        + 'The estimate counts CJK as ~1 token/char and other text as ~3.5 chars/token, with 10% headroom.',
+      'decisions.empty': 'No request has gone through the router yet',
       defaultModel: 'Current default model',
       empty: '(not set)',
       loading: 'Loading…',
@@ -240,6 +257,11 @@ window.__ModuleLoader__.load({
     }
     /** Provider groups the pickers may offer (never the router itself). */
     const pickableGroups = (groups) => (groups ?? []).filter((g) => g.id !== 'tier-router')
+    /** ISO decision timestamp → local wall clock, for the decision list. */
+    const clockOf = (iso) => {
+      const at = new Date(iso)
+      return Number.isNaN(at.getTime()) ? '--:--:--' : at.toLocaleTimeString()
+    }
     /**
      * Clear the model field when the new provider no longer lists the current
      * model (or the provider was cleared), so the UI never shows a provider
@@ -280,9 +302,17 @@ window.__ModuleLoader__.load({
       const chosen = groups.find((g) => g.id === value.provider)
       const modelOptions = useMemo(() => {
         const models = chosen !== undefined ? (chosen.models ?? []) : []
+        // Carry the context window through so the option label can show it —
+        // this is what makes "will this tier actually fit my session?" visible
+        // before a request fails.
         const list = models
           .filter((m) => !visionOnly || m.vision !== false)
-          .map((m) => ({ id: m.id, name: m.name, vision: m.vision }))
+          .map((m) => ({
+            id: m.id,
+            name: m.name,
+            vision: m.vision,
+            contextWindow: Number.isFinite(m.contextWindow) ? m.contextWindow : undefined,
+          }))
         // Only keep a stored model id that is not in the catalog when the
         // provider is actually set; with no provider the model select shows
         // "not set" instead of a stale model name. A vision row must never
@@ -347,7 +377,13 @@ window.__ModuleLoader__.load({
             onChange: (e) => onChange('model', e.target.value),
           },
             h(Option, { value: '', label: t('empty') }),
-            modelOptions.map((m) => h(Option, { key: m.id, value: m.id, label: m.name })),
+            modelOptions.map((m) => h(Option, {
+              key: m.id,
+              value: m.id,
+              label: m.contextWindow === undefined
+                ? m.name
+                : `${m.name} · ${Math.round(m.contextWindow / 1000)}k ctx`,
+            })),
           ),
           visionBadge(chosenModel),
           effortOptions.length > 0
@@ -386,6 +422,19 @@ window.__ModuleLoader__.load({
       const [stats, setStats] = useState(null)
       const [saving, setSaving] = useState(false)
       const [saveFailed, setSaveFailed] = useState(false)
+      /** Newest-last decision ring from the host; rendered newest-first. */
+      const decisions = (Array.isArray(stats?.decisions) ? stats.decisions : []).map((d) => ({
+        at: String(d?.at ?? ''),
+        outcome: d?.outcome === 'failed' ? 'failed' : 'ok',
+        provider: String(d?.provider ?? ''),
+        model: String(d?.model ?? ''),
+        effort: String(d?.effort ?? ''),
+        level: String(d?.level ?? ''),
+        reason: String(d?.reason ?? ''),
+        tried: Array.isArray(d?.tried) ? d.tried : [],
+        skipped: Array.isArray(d?.skipped) ? d.skipped : [],
+        estimate: Number.isFinite(d?.estimate) ? d.estimate : 0,
+      }))
 
       const loadConfig = async () => {
         try {
@@ -519,7 +568,7 @@ window.__ModuleLoader__.load({
         for (const tier of [...TIERS, VISION]) {
           fields.push(fieldPath(tier.key, 'provider'), fieldPath(tier.key, 'model'), fieldPath(tier.key, 'effort'))
         }
-        fields.push('fallbackProvider', 'fallbackModel', 'llmClassifierProvider', 'llmClassifierModel', 'visionFallbacks')
+        fields.push('fallbackProvider', 'fallbackModel', 'llmClassifierProvider', 'llmClassifierModel', 'visionFallbacks', 'contextGuard')
         fields.push('classifier')
         for (const field of fields) void write(field, '')
       }
@@ -537,6 +586,18 @@ window.__ModuleLoader__.load({
             h('label', { style: { fontSize: 13, fontWeight: 600 } }, t('enable')),
           ),
           h('div', { style: S.hint }, t('enable.hint')),
+        ),
+        h('div', { style: S.card },
+          h('div', { style: S.switchRow },
+            h('input', {
+              type: 'checkbox',
+              checked: value.contextGuard !== false,
+              disabled: !writable,
+              onChange: (e) => void write('contextGuard', e.target.checked),
+            }),
+            h('label', { style: { fontSize: 13, fontWeight: 600 } }, t('contextGuard')),
+          ),
+          h('div', { style: S.hint }, t('contextGuard.hint')),
         ),
         h('div', { style: S.card },
           h('div', { style: S.row },
@@ -663,6 +724,27 @@ window.__ModuleLoader__.load({
               )
             : null,
           catalogError ? h('span', { style: { ...S.stat, color: 'rgba(220,80,80,1)' } }, t('loadError')) : null,
+        ),
+        // Which model actually handled each recent request. The host keeps a
+        // bounded ring (newest last); show newest first, capped for width.
+        h('div', { style: { marginTop: 12 } },
+          h('div', { style: S.hint }, t('decisions')),
+          decisions.length === 0
+            ? h('div', { style: S.stat }, t('decisions.empty'))
+            : decisions.slice().reverse().slice(0, 8).map((d, index) => h('div', {
+                key: `${d.at}-${index}`,
+                style: S.stat,
+              },
+                `${clockOf(d.at)}  `,
+                d.outcome === 'failed'
+                  ? `✗ ${t('decisions.failed')}`
+                  : `${d.provider}/${d.model}${d.effort !== '' ? ` @${d.effort}` : ''}`,
+                d.level !== '' ? `  ·  ${d.level}` : '',
+                d.estimate > 0 ? `  ·  ~${Math.round(d.estimate / 1000)}k tok` : '',
+                d.tried.length > 0 ? `  ·  ${t('decisions.tried')} ${d.tried.join(' → ')}` : '',
+                d.skipped.length > 0 ? `  ·  ${t('decisions.skipped')} ${d.skipped.join('; ')}` : '',
+                d.reason !== '' ? `  ·  ${d.reason}` : '',
+              )),
         ),
       )
     }
