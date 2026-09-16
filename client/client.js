@@ -86,6 +86,7 @@ window.__ModuleLoader__.load({
       'stats.easy': '简单',
       'stats.vision': '视觉档',
       'stats.visionBridge': '视觉分析',
+      'stats.fallback': '回退接管',
       'stats.error': '错误',
       decisions: '最近路由决策（每次请求选了哪个模型）',
       'decisions.failed': '全部失败',
@@ -159,6 +160,7 @@ window.__ModuleLoader__.load({
       'stats.easy': 'Easy',
       'stats.vision': 'Vision tier',
       'stats.visionBridge': 'Vision analyses',
+      'stats.fallback': 'Fallbacks',
       'stats.error': 'Errors',
       decisions: 'Recent routing decisions (which model handled each request)',
       'decisions.failed': 'all routes failed',
@@ -720,6 +722,7 @@ window.__ModuleLoader__.load({
                 h('span', { style: S.stat }, `${t('stats.easy')} ${stats.easy ?? 0}`),
                 h('span', { style: S.stat }, `${t('stats.vision')} ${stats.vision ?? 0}`),
                 h('span', { style: S.stat }, `${t('stats.visionBridge')} ${stats.visionBridge ?? 0}`),
+                h('span', { style: S.stat }, `${t('stats.fallback')} ${stats.fallback ?? 0}`),
                 h('span', { style: S.stat }, `${t('stats.error')} ${stats.error ?? 0}`),
               )
             : null,

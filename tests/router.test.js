@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  TierRouterAdapter, createStats, estimatePromptTokens, lastUserMessage, blocksText, failureChunk,
+  TierRouterAdapter, createDecisionCache, createStats, estimatePromptTokens, lastUserMessage,
+  blocksText, failureChunk,
 } from '../lib/router.js'
 import { DEFAULTS } from '../lib/schema.js'
 
@@ -700,4 +701,55 @@ test('stats: the decision ring is bounded', () => {
   const { decisions } = stats.snapshot()
   assert.equal(decisions.length, 20)
   assert.equal(decisions.at(-1).provider, 'p29')
+})
+
+// ---------- regression guards for the counter + cache-TTL fixes ----------
+
+test('createDecisionCache: a zero TTL never expires on its own, getWithAge exposes the entry', () => {
+  const cache = createDecisionCache(0, 10)
+  cache.set('k', 'v')
+  // Simulate an old entry: the caller (vision.js) owns the lifetime now.
+  const entry = cache.getWithAge('k')
+  assert.equal(entry.value, 'v')
+  entry.at = Date.now() - 10 * 60 * 60 * 1000
+  assert.equal(cache.get('k'), 'v', 'a zero TTL must not evict')
+  assert.equal(cache.getWithAge('k').value, 'v')
+})
+
+test('createDecisionCache: a positive TTL still expires', () => {
+  const cache = createDecisionCache(1000, 10)
+  cache.set('k', 'v')
+  cache.getWithAge('k').at = Date.now() - 5000
+  assert.equal(cache.get('k'), undefined)
+  assert.equal(cache.getWithAge('k'), undefined, 'expired entries are dropped by get')
+})
+
+test('stream: the fallback counter counts only routes that were not requested', async () => {
+  // The classified tier fails, so the second route answers → exactly one fallback.
+  const llm = fakeLlm(
+    { 'deepseek-official/deepseek-chat': [] },
+    ['deepseek-official/deepseek-v4-pro'],
+  )
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'deepseek-official',
+    hardModel: 'deepseek-v4-pro',
+    normalProvider: 'deepseek-official',
+    normalModel: 'deepseek-chat',
+  }), { stats })
+  await collect(router.stream(optionsFor('重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整')))
+  assert.equal(stats.snapshot().fallback, 1, 'the answering fallback tier must be counted')
+})
+
+test('stream: a request answered by its own tier does not count as a fallback', async () => {
+  const llm = fakeLlm({ 'deepseek-official/deepseek-v4-pro': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'deepseek-official',
+    hardModel: 'deepseek-v4-pro',
+  }), { stats })
+  await collect(router.stream(optionsFor('重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整')))
+  assert.equal(stats.snapshot().fallback, 0)
 })

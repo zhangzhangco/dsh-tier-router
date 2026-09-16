@@ -27,6 +27,18 @@ Answering "which model did it actually use, and what happens when the session ou
 - 7 more tests (92 total) covering the estimator, the skip, unknown windows, fail-open, the
   `contextGuard: false` escape hatch, and the decision ring.
 
+### Fixed
+
+- **`visionCacheTtl` above one hour was silently capped at one hour.** The evidence cache was
+  constructed with a hardcoded 1h TTL of its own while the setting only gated writes, so raising
+  the setting had no effect. `createDecisionCache` now supports a `0` TTL meaning "the caller owns
+  the lifetime" (plus a `getWithAge` accessor), the router builds the vision cache that way, and
+  `lib/vision.js` enforces `visionCacheTtl` itself — the setting is now the single authority, and
+  `0` disables reads as well as writes.
+- **The `fallback` counter was always 0.** It was defined, shown in the card and returned by the
+  API, but never recorded. It now counts a request whose answer came from any route other than the
+  one the classification asked for, and the card displays it (`Fallbacks` / `回退接管`).
+
 ## [0.1.1] - 2026-09-16
 
 Engineering-debt pass: the pieces the 0.1.0 adaptation left behind upstream.

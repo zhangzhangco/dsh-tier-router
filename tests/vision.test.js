@@ -257,3 +257,45 @@ test('VISION_PROMPT exists and asks for structured evidence', () => {
   assert.ok(VISION_PROMPT.includes('uncertainty'))
   assert.ok(VISION_PROMPT.includes('"summary"'))
 })
+
+// ---------- visionCacheTtl is the single authority for the evidence cache ----------
+
+/** A cache shaped like createDecisionCache (exposes raw entries). */
+function ageingCache(initial = []) {
+  const map = new Map(initial)
+  return {
+    map,
+    getWithAge: (key) => map.get(key),
+    get: (key) => map.get(key)?.value,
+    set: (key, value) => { map.set(key, { value, at: Date.now() }) },
+  }
+}
+
+test('replaceImages: a TTL above one hour is honoured, not silently capped', async () => {
+  let calls = 0
+  const ctx = { llm: { prepareCall: async () => { calls += 1; throw new Error('should not be called') } } }
+  // Entry written 90 minutes ago: past the old hardcoded 1h, inside the setting.
+  const cache = ageingCache([['sha256:aaa', { value: 'old but valid evidence', at: Date.now() - 90 * 60 * 1000 }]])
+  const settings = { visionProvider: 'ovh-vision', visionModel: 'Qwen2.5-VL-72B-Instruct', visionCacheTtl: 7200 }
+  const out = await replaceImages(ctx, settings, messagesWithImage(), undefined, cache, { record: () => {} }, () => {})
+  assert.equal(calls, 0, 'the vision model must not be called again inside the TTL')
+  assert.equal(out[0].content[1].text, 'old but valid evidence')
+})
+
+test('replaceImages: evidence older than the setting is re-analysed', async () => {
+  const ctx = { llm: fakeVisionLlm({ 'ovh-vision/Qwen2.5-VL-72B-Instruct': JSON_REPLY }) }
+  const cache = ageingCache([['sha256:aaa', { value: 'stale evidence', at: Date.now() - 3 * 60 * 60 * 1000 }]])
+  const settings = { visionProvider: 'ovh-vision', visionModel: 'Qwen2.5-VL-72B-Instruct', visionCacheTtl: 3600 }
+  const out = await replaceImages(ctx, settings, messagesWithImage(), undefined, cache, { record: () => {} }, () => {})
+  assert.ok(out[0].content[1].text.includes('摘要：一张猫的图片'), 'stale evidence must be replaced by a fresh analysis')
+})
+
+test('replaceImages: visionCacheTtl 0 disables reads as well as writes', async () => {
+  let calls = 0
+  const ctx = { llm: fakeVisionLlm({ 'ovh-vision/Qwen2.5-VL-72B-Instruct': JSON_REPLY }) }
+  const cache = ageingCache([['sha256:aaa', { value: 'cached evidence', at: Date.now() }]])
+  const settings = { visionProvider: 'ovh-vision', visionModel: 'Qwen2.5-VL-72B-Instruct', visionCacheTtl: 0 }
+  const out = await replaceImages(ctx, settings, messagesWithImage(), undefined, cache, { record: () => { calls += 1 } }, () => {})
+  assert.ok(out[0].content[1].text.includes('摘要：一张猫的图片'), 'a disabled cache must not serve cached evidence')
+  assert.equal(cache.map.get('sha256:aaa').value, 'cached evidence', 'and must not overwrite it either')
+})
