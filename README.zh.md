@@ -52,6 +52,16 @@ dsh plugin --profile web add dsh-tier-router
 dsh plugin --profile web add github:zhangzhangco/dsh-tier-router
 ```
 
+**升级。** `dsh plugin add` 记录的是 caret 范围，而 `0.x` 版本的 caret 只锁**次版本**：
+`^0.1.0` 永远不会解析到 `0.2.0`。所以要显式指定版本或 tag：
+
+```sh
+dsh plugin --profile web add dsh-tier-router@latest
+```
+
+另外，刚发布后本地安装可能仍从 pnpm 缓存的 registry 索引解析到上一个版本；直接钉住确切版本
+（`dsh-tier-router@0.2.0`）一定会重新拉取。
+
 ## 快速开始
 
 1. 打开 Web GUI →「设置 → Tier Router」，为四个档位各选一个 provider + model。

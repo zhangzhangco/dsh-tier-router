@@ -61,6 +61,16 @@ Installing straight from GitHub also works (this package is plain ESM with no bu
 dsh plugin --profile web add github:zhangzhangco/dsh-tier-router
 ```
 
+**Updating.** `dsh plugin add` records a caret range, and for a `0.x` version a caret pins the
+*minor*: `^0.1.0` can never resolve to `0.2.0`. Ask for the version (or the tag) explicitly:
+
+```sh
+dsh plugin --profile web add dsh-tier-router@latest
+```
+
+Right after a release, a local install can still resolve the previous version from pnpm's cached
+registry index; pinning the exact version (`dsh-tier-router@0.2.0`) always re-fetches.
+
 ## Quick start
 
 1. Open the Web GUI → **Settings → Tier Router** and give each of the four tiers a provider + model.
