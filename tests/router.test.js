@@ -656,6 +656,8 @@ test('resolveChain: the guard never empties a chain (fail-open)', async () => {
   }))
   const resolved = await router.resolveChain(optionsFor('长文本 '.repeat(500)))
   assert.ok(resolved.chain.length > 0, 'a routable request must never become "no route"')
+  // ...and the card still gets to explain the failure.
+  assert.equal(resolved.skipped.length, resolved.chain.length)
 })
 
 test('resolveChain: contextGuard=false disables the skip entirely', async () => {
