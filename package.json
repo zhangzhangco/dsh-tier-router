@@ -1,0 +1,78 @@
+{
+  "name": "dsh-tier-router",
+  "version": "0.1.0",
+  "description": "Automatic tier-based model routing for DeepSeek Harness: a virtual `smart` model classifies each request by difficulty (hard / normal / easy) and by vision need, then delegates it to the models you already configured. 三级难度 + 视觉自动路由，虚拟 smart 模型零配置接入。",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "author": "zhangzhangco",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhangzhangco/dsh-tier-router.git"
+  },
+  "homepage": "https://github.com/zhangzhangco/dsh-tier-router#readme",
+  "bugs": {
+    "url": "https://github.com/zhangzhangco/dsh-tier-router/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "cordis-plugin",
+    "model-router",
+    "llm-router",
+    "model-routing",
+    "routing",
+    "tier",
+    "difficulty",
+    "classifier",
+    "vision",
+    "llm",
+    "ai-agents",
+    "plugin"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.5-rc.2"
+  }
+}

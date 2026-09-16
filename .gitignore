@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# npm pack / publish artifacts
+*.tgz
+npm-debug.log*
+
+# macOS
+.DS_Store
+
+# editors
+.vscode/
+.idea/

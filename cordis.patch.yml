@@ -1,0 +1,18 @@
+# dsh-tier-router: automatic model routing for DeepSeek Harness.
+#
+# Registers the virtual `tier-router` provider (model `smart`). Pick it in
+# the chat model selector and every request is classified by difficulty
+# (hard / normal / easy) and by vision need, then delegated to the models
+# configured in the "Tier Router" settings section.
+#
+# Tier defaults live in the plugin's settings schema (lib/schema.js) and can
+# be overridden per deployment here, e.g.:
+#
+#   config:
+#     hardProvider: codex-local
+#     hardModel: gpt-6-astra
+#     easyProvider: gpudev
+#     easyModel: qwen3.8-27b-q5
+- insert:
+    - id: tier-router
+      name: dsh-tier-router
