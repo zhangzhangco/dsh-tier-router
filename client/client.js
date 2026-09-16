@@ -91,6 +91,8 @@ window.__ModuleLoader__.load({
       decisions: '最近路由决策（每次请求选了哪个模型）',
       'decisions.failed': '全部失败',
       'decisions.tried': '先试过',
+      'decisions.overhead': '路由耗时',
+      'decisions.classify': '其中分类',
       'decisions.skipped': '跳过（上下文不够）',
       contextGuard: '上下文感知（跳过装不下的模型）',
       'contextGuard.hint': '开启后，若某档位模型的上下文窗口小于本次请求的估算长度，会跳过它并改用装得下的档位；'
@@ -165,6 +167,8 @@ window.__ModuleLoader__.load({
       decisions: 'Recent routing decisions (which model handled each request)',
       'decisions.failed': 'all routes failed',
       'decisions.tried': 'tried',
+      'decisions.overhead': 'routing',
+      'decisions.classify': 'classify',
       'decisions.skipped': 'skipped (window too small)',
       contextGuard: 'Context-aware routing (skip models that cannot hold the request)',
       'contextGuard.hint': 'When on, a tier whose model context window is smaller than the estimated request '
@@ -436,6 +440,10 @@ window.__ModuleLoader__.load({
         tried: Array.isArray(d?.tried) ? d.tried : [],
         skipped: Array.isArray(d?.skipped) ? d.skipped : [],
         estimate: Number.isFinite(d?.estimate) ? d.estimate : 0,
+        // Routing overhead: everything spent before the chosen model was
+        // called. The number to look at when routing "feels slow".
+        overheadMs: Number.isFinite(d?.timings?.overheadMs) ? d.timings.overheadMs : 0,
+        classifyMs: Number.isFinite(d?.timings?.classifyMs) ? d.timings.classifyMs : 0,
       }))
 
       const loadConfig = async () => {
@@ -744,6 +752,10 @@ window.__ModuleLoader__.load({
                   : `${d.provider}/${d.model}${d.effort !== '' ? ` @${d.effort}` : ''}`,
                 d.level !== '' ? `  ·  ${d.level}` : '',
                 d.estimate > 0 ? `  ·  ~${Math.round(d.estimate / 1000)}k tok` : '',
+                d.overheadMs > 0
+                  ? `  ·  ${t('decisions.overhead')} ${(d.overheadMs / 1000).toFixed(2)}s` +
+                    (d.classifyMs >= 50 ? ` (${t('decisions.classify')} ${(d.classifyMs / 1000).toFixed(1)}s)` : '')
+                  : '',
                 d.tried.length > 0 ? `  ·  ${t('decisions.tried')} ${d.tried.join(' → ')}` : '',
                 d.skipped.length > 0 ? `  ·  ${t('decisions.skipped')} ${d.skipped.join('; ')}` : '',
                 d.reason !== '' ? `  ·  ${d.reason}` : '',

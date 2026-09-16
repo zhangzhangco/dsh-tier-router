@@ -173,6 +173,8 @@ tier-router:
 | `visionFallbacks` | `[]` | Explicit vision fallbacks before the default model. |
 | `fallbackProvider` / `fallbackModel` | `''` | Route used when no tier is configured; empty = session default. |
 | `llmClassifierProvider` / `llmClassifierModel` | `''` | Classifier model for `classifier: llm`. |
+| `classifierTimeoutMs` | `4000` | Budget for the LLM classifier. On timeout the heuristic decides immediately and the slow answer is cached for later requests. |
+| `visionTimeoutMs` | `60000` | Budget for one vision-sidecar call, so a hung vision provider cannot stall the turn. |
 | `contextGuard` | `true` | Skip routes whose known context window cannot hold the request. |
 
 ## How routing works

@@ -155,6 +155,8 @@ tier-router:
 | `visionFallbacks` | `[]` | 视觉档失败后、默认模型之前的显式回退。 |
 | `fallbackProvider` / `fallbackModel` | `''` | 所有档位都未配置时使用的路由；空 = 会话默认模型。 |
 | `llmClassifierProvider` / `llmClassifierModel` | `''` | `classifier: llm` 时使用的分类模型。 |
+| `classifierTimeoutMs` | `4000` | LLM 分类器预算。超时则立刻改用启发式，慢分类的结果仍会写入缓存供后续请求使用。 |
+| `visionTimeoutMs` | `60000` | 单次视觉旁路调用预算，避免视觉模型卡住整个回合。 |
 | `contextGuard` | `true` | 跳过上下文窗口装不下本次请求的路由。 |
 
 ## 路由规则

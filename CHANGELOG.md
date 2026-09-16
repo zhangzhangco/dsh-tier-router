@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 — review fixes (not yet published)
+## [0.2.1] - 2026-09-16
 
 Four defects found by reading the code, all with regression tests (99 → 111).
 
@@ -40,6 +40,27 @@ Four defects found by reading the code, all with regression tests (99 → 111).
 All notable changes to `dsh-tier-router` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+### Fixed (routing latency)
+
+- **Routing could stall for many seconds, or appear to hang.** With `classifier: llm` the difficulty
+  classifier runs *before* the real request is dispatched, and it had no timeout — this machine's
+  classifier (`gpudev/qwen3.8-27b-q5`) measured **9.3s warm and 91.3s cold**, and that whole wait
+  was added to every new message. The classifier is now bounded by `classifierTimeoutMs`
+  (default 4000): on timeout the heuristic decides immediately and the request proceeds, while the
+  slow classification keeps running and its answer is cached so the next request is fast.
+- **The vision sidecar had the same exposure.** `visionMode: replace` calls the vision model per new
+  image before routing (a Codex CLI call here, tens of seconds), with no bound, so a hung provider
+  stalled the turn indefinitely. It is now bounded by `visionTimeoutMs` (default 60000), aborted via
+  an AbortController *and* raced, so the turn proceeds even if an adapter ignores the signal.
+
+### Added
+
+- **Per-decision routing timings.** Each decision now records `timings.overheadMs` — everything
+  spent before the chosen model was called — plus the `prepareMs` / `resolveMs` / `classifyMs` /
+  `guardMs` breakdown, and the settings card shows it (`routing 0.03s`, or `routing 4.01s
+  (classify 4.0s)` when the classifier was the cost). "The router is slow" is now attributable
+  instead of a guess.
 
 ## [0.2.0] - 2026-09-16
 

@@ -854,3 +854,98 @@ test('contextWindowOf: a transient failure is retried, a known window is not', a
   assert.equal(await router.contextWindowOf('p', 'm'), 131_072)
   assert.equal(attempts, 2)
 })
+
+// ---------- routing latency: nothing on the critical path may stall ----------
+
+/** An llm whose classifier never answers quickly (models a cold local model). */
+function slowClassifierLlm(delayMs, reply = '{"level": "easy", "reason": "slow"}') {
+  const calls = []
+  const llm = {
+    calls,
+    async prepareCall(config) {
+      calls.push(`${config.provider}/${config.model}`)
+      if (config.model === 'slow-classifier') {
+        return {
+          config: { provider: config.provider, model: config.model, maxTokens: config.maxTokens },
+          async *stream() {
+            await new Promise((resolve) => setTimeout(resolve, delayMs))
+            yield { type: 'text-delta', index: 0, text: reply }
+          },
+        }
+      }
+      return {
+        config: { provider: config.provider, model: config.model },
+        async *stream() {
+          yield { type: 'text-delta', index: 0, text: `[${config.provider}/${config.model}]` }
+        },
+      }
+    },
+  }
+  return llm
+}
+
+const CLASSIFIED = '重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整'
+
+test('stream: a slow LLM classifier does not stall the request (bounded, → heuristic)', async () => {
+  const llm = slowClassifierLlm(3000, '{"level": "easy", "reason": "slow"}')
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    classifier: 'llm',
+    llmClassifierProvider: 'p', llmClassifierModel: 'slow-classifier',
+    classifierTimeoutMs: 60,
+    hardProvider: 'p', hardModel: 'fast-target',
+  }), { stats: createStats() })
+  const started = Date.now()
+  const chunks = await collect(router.stream(optionsFor(CLASSIFIED)))
+  const elapsed = Date.now() - started
+  assert.ok(elapsed < 1500, `request must not wait for the classifier (took ${elapsed}ms)`)
+  // The heuristic answer for this text is "hard", and the hard tier answered.
+  assert.ok(chunks.some((c) => c.type === 'text-delta' && c.text === '[p/fast-target]'))
+})
+
+test('stream: the late classifier answer is cached for the next request', async () => {
+  const llm = slowClassifierLlm(120, '{"level": "easy", "reason": "slow"}')
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    classifier: 'llm',
+    llmClassifierProvider: 'p', llmClassifierModel: 'slow-classifier',
+    classifierTimeoutMs: 30, // times out, then the answer lands in the cache
+    easyProvider: 'p', easyModel: 'easy-target',
+    normalProvider: 'p', normalModel: 'normal-target',
+    hardProvider: 'p', hardModel: 'hard-target',
+  }), { stats })
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  assert.equal(
+    llm.calls.filter((c) => c === 'p/slow-classifier').length, 1,
+    'the classifier was called once (plus the delegated target)',
+  )
+  await new Promise((resolve) => setTimeout(resolve, 300)) // let the late answer land
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  // Second request: cache hit for the classification, and the "easy" verdict
+  // the slow classifier returned is what routes the request now.
+  assert.equal(llm.calls.filter((c) => c === 'p/slow-classifier').length, 1, 'the classifier must not be called twice')
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.equal(decision.level, 'easy')
+  assert.equal(decision.model, 'easy-target')
+})
+
+test('decision records carry where the routing time went', async () => {
+  const llm = fakeLlm({ 'deepseek-official/deepseek-v4-pro': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'deepseek-official', hardModel: 'deepseek-v4-pro',
+  }), { stats })
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.ok(Number.isFinite(decision.timings.overheadMs), 'overheadMs must be recorded')
+  assert.ok(decision.timings.overheadMs >= 0)
+  assert.equal(decision.timings.classifyMs, 0, 'heuristic classification costs nothing')
+  assert.ok(Number.isFinite(decision.timings.guardMs))
+})
+
+test('settings: the classifier budget defaults to 4s and is overridable', () => {
+  assert.equal(DEFAULTS.classifierTimeoutMs, 4000)
+  assert.equal(DEFAULTS.visionTimeoutMs, 60000)
+})
