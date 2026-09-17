@@ -342,6 +342,52 @@ test('stats GET exposes the per-turn counters and the classification diagnosis',
   assert.ok(last.inputChars > 0)
 })
 
+test('stats GET exposes benched routes, so an unavailable model is visible', async () => {
+  // `index.js` composes the adapter's route health into the counter snapshot
+  // (health is per route, not per counter); this asserts the payload the card
+  // reads, including the shape the client renders.
+  const stats = createStats()
+  const llm = {
+    async prepareCall(config) {
+      const broken = config.model === 'gpt-6-astra'
+      return {
+        config: { provider: config.provider, model: config.model },
+        async *stream() {
+          if (broken) {
+            yield { type: 'finish', reason: { kind: 'error', failure: { code: 'QUOTA', message: 'usage limit reached' } } }
+            return
+          }
+          yield { type: 'text-delta', index: 0, text: 'answered by the fallback' }
+        },
+      }
+    },
+  }
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => routerSettings({
+    hardProvider: 'codex-local', hardModel: 'gpt-6-astra',
+    fallbackProvider: 'deepseek-official', fallbackModel: 'deepseek-chat',
+  }), { stats })
+  await collect(router.stream({
+    provider: 'tier-router',
+    model: 'smart',
+    sessionId: 's1',
+    messages: [{ role: 'user', content: [{ type: 'text', text: '重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整' }] }],
+  }))
+
+  const captured = {}
+  ctx.webServer = { register: ({ handler }) => { captured.handler = handler; return () => {} } }
+  installModelsApi(ctx, () => ({ snapshot: () => ({ ...stats.snapshot(), benched: router.benchedRoutes() }) }))
+  const res = await invoke(captured.handler, fakeReq('GET', '/tier-router/api/stats'), fakeRes())
+
+  assert.equal(res.status, 200)
+  const benched = res.json.stats.benched
+  assert.equal(benched.length, 1)
+  assert.equal(benched[0].provider, 'codex-local')
+  assert.equal(benched[0].model, 'gpt-6-astra')
+  assert.equal(benched[0].code, 'QUOTA')
+  assert.ok(benched[0].secondsLeft > 0)
+})
+
 test('stats GET reports a recovered route failure without calling the request an error', async () => {
   const stats = createStats()
   const llm = {

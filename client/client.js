@@ -102,6 +102,8 @@ window.__ModuleLoader__.load({
       'decisions.turn': '新回合',
       'decisions.continuation': '同回合续跑',
       'decisions.input': '判据文本',
+      'benched.title': '已停用路由（判定为当前不可用）',
+      'benched.retryIn': '后重试',
       contextGuard: '上下文感知（跳过装不下的模型）',
       'contextGuard.hint': '开启后，若某档位模型的上下文窗口小于本次请求的估算长度，会跳过它并改用装得下的档位；'
         + '窗口未知的模型不会被跳过。估算按 CJK 1 字≈1 token、其它 3.5 字符≈1 token，并预留 10% 余量。',
@@ -186,6 +188,8 @@ window.__ModuleLoader__.load({
       'decisions.turn': 'new turn',
       'decisions.continuation': 'same turn',
       'decisions.input': 'decided from',
+      'benched.title': 'Benched routes (judged unavailable)',
+      'benched.retryIn': 'retry in',
       contextGuard: 'Context-aware routing (skip models that cannot hold the request)',
       'contextGuard.hint': 'When on, a tier whose model context window is smaller than the estimated request '
         + 'length is skipped in favour of a tier that fits. Models with an unknown window are never skipped. '
@@ -763,6 +767,16 @@ window.__ModuleLoader__.load({
             : null,
           catalogError ? h('span', { style: { ...S.stat, color: 'rgba(220,80,80,1)' } }, t('loadError')) : null,
         ),
+        // A route that already told us it cannot serve is benched, so the next
+        // request skips it instead of paying its failure again. Saying so here
+        // is the difference between "the router is broken" and "that model is
+        // out of quota and the fallback is answering".
+        Array.isArray(stats?.benched) && stats.benched.length > 0
+          ? h('div', { style: { ...S.stat, marginTop: 4, color: 'rgba(220,180,60,1)' } },
+              `${t('benched.title')}: `,
+              stats.benched.map((b) => `${b.provider}/${b.model} — ${b.code || 'failed'}${b.message !== '' ? ` (${b.message})` : ''}, ${b.secondsLeft}s ${t('benched.retryIn')}`).join('  ·  '),
+            )
+          : null,
         // The per-request counters above are dominated by the agent tool loop:
         // one human turn re-sends the same classified message on every step, so
         // they mostly measure how many steps a task took. This line is the

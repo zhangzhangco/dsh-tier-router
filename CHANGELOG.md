@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.3.0] - 2026-09-17
+
+A tier that cannot serve a request is not a tier that failed once. The router now reacts to the
+harness failure code instead of only advancing the chain.
+
+### Added
+
+- **Failure-code routing.** `HarnessError.code` is the harness's stable machine-routable failure
+  class, and its contract says to route on it rather than parse the message. The router does:
+  `QUOTA` / `AUTH` / `INVALID_CREDENTIAL` / `MISSING_CREDENTIAL` / `NO_ADAPTER` mean "this route
+  cannot serve" and bench it immediately, while `TRANSPORT` / `TIMEOUT` / `SERVER` / `RATE_LIMIT` /
+  `EMPTY_RESPONSE` and unknown codes only bench after `routeFailureThreshold` consecutive failures.
+- **Benched routes (`routeCooldownMs`, default 300000; `routeFailureThreshold`, default 2).** A
+  benched route is skipped outright instead of paying its failure again on the next request, and
+  Settings → Tier Router lists it with the code, message and seconds remaining (`benched` in the
+  stats payload). Any success clears the streak; `0` disables the bench.
+- `CONTEXT_WINDOW_EXCEEDED` and `ABORTED` never bench a route: they describe the request, not the
+  route's health.
+- The failure ring now keeps each failure's `code` next to its message.
+- `failureCodeOf`, `failureMessageOf` and `TierRouterAdapter#benchedRoutes` are exported.
+
+### Notes
+
+- **The bench is fail-open**, exactly like the context guard: if every route is benched the chain is
+  used anyway, with the reason kept in the decision's `skipped` list. It must never turn a routable
+  request into `NO_ROUTE`.
+- **This stops the bleeding from the second request onward.** The first one still waits out whatever
+  the adapter costs before reporting failure — no code can arrive sooner than the failure does.
+  Bounding that first request needs a timeout inside the adapter (`dsh-llm-codex`'s `timeoutMs`,
+  default 10 minutes per `codex exec`).
+- **Why the streak rule exists:** an exhausted quota can surface as nothing but a connection timeout.
+  A real Codex CLI failure carried the entire diagnostic `Reconnecting... 2/5 (request timed out)`,
+  which the harness quota classifier does not match — parsing cannot recover a signal that was never
+  emitted, so repeated failure is the fallback signal.
+
+8 new tests (136 -> 144, plus 2 at the HTTP boundary).
+
 ## [0.2.3] - 2026-09-17
 
 The classifier was reading the wrong message. On any request after the first in a turn it was handed

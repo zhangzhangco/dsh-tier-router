@@ -205,6 +205,35 @@ tier-router:
 - **`visionMode`。** `replace`（默认）让视觉模型只做辅助：它返回结构化证据，证据文本替换图片，
   最终由难度档位作答。`route` 是旧行为：整轮直接交给视觉档。
 
+## 模型不可用时会发生什么
+
+**某一档"服务不了"和"偶尔失败一次"是两件事。** 路由器读 harness 的失败码（`HarnessError.code`
+—— harness 的契约明确写着"按 code 路由，绝不解析 message"），区别对待：
+
+| 失败性质 | 失败码 | 路由器行为 |
+| --- | --- | --- |
+| **这条路由服务不了** | `QUOTA`、`AUTH`、`INVALID_CREDENTIAL`、`MISSING_CREDENTIAL`、`NO_ADAPTER` | 立即换下一档，**并把该路由停用** `routeCooldownMs`（默认 5 分钟） |
+| **只是这次出错了** | `TRANSPORT`、`TIMEOUT`、`SERVER`、`RATE_LIMIT`、`EMPTY_RESPONSE`、未知码 | 换下一档；只在窗口内连续失败 `routeFailureThreshold`（默认 2）次后才停用 |
+| **是这次请求的问题，不是路由的问题** | `CONTEXT_WINDOW_EXCEEDED`、`ABORTED` | 换下一档，**永不停用**：下一个更小的请求很可能装得下 |
+
+被停用的路由会被直接跳过 —— 它的失败不会被重复支付 —— 设置页会把它连同失败码、失败信息和剩余秒数列出来：
+
+```
+已停用路由（判定为当前不可用）: codex-local/gpt-6-astra — QUOTA (usage limit reached), 274s 后重试
+```
+
+任何一次成功都会清空该路由的失败计数；`routeCooldownMs: 0` 关闭停用机制；停用**永远不允许把路由链清空** ——
+所有路由都被停用时仍然照常尝试，理由留在决策记录的 `skipped` 里（和上下文守卫一样的 fail-open）。
+
+**为什么还需要"连续失败"这条规则：失败码并不总是有信息量。** 账号配额耗尽有时只表现为一次连接超时，
+因为 provider 或它的 CLI 就只说了这么一句 —— 在真实的 Codex CLI 失败上实测过，它的全部诊断信息就是
+`Reconnecting... 2/5 (request timed out)`。解析 message 救不回一个从未被发出的信号，所以路由器退回到
+"同一条路由连续失败两次"。
+
+**必须说清楚的局限：** 这只从**第二次请求**开始止血。第一次仍然要等适配器自己报错，而失败码不可能比失败本身更早到达。
+要约束第一次的等待时间，只能靠**适配器内部**的超时（对 `dsh-llm-codex` 来说是它 provider 条目里的
+`timeoutMs`，默认一次 `codex exec` 十分钟）。
+
 ## HTTP API
 
 设置卡片通过以下宿主接口读写配置：
@@ -214,7 +243,7 @@ tier-router:
 | `GET` | `/tier-router/api/models` | 全部 provider 的模型目录（图片能力、推理强度）+ 当前默认模型。 |
 | `GET` | `/tier-router/api/config` | 解析后的配置 + 默认值 + 是否可写。 |
 | `POST` | `/tier-router/api/config` | 写入单个字段（`{field, value}`）；`value: null` 恢复默认。要求 `content-type: application/json` 且 `Origin`/`Host` 同源，因此你随便访问的网页无法改写路由配置。 |
-| `GET` | `/tier-router/api/stats` | 路由计数（`hard`/`normal`/`easy`/`vision`/`visionBridge`/`fallback`/`error`/`routeError`）、按回合计数（`turns`）、最近失败环形缓冲（`errors`）、最近决策环形缓冲（`decisions`）。`error` 指没有任何路由能应答的请求；`routeError` 指单条路由失败，包含被回退链救回来的那些。 |
+| `GET` | `/tier-router/api/stats` | 路由计数（`hard`/`normal`/`easy`/`vision`/`visionBridge`/`fallback`/`error`/`routeError`）、按回合计数（`turns`）、最近失败环形缓冲（`errors`）、最近决策环形缓冲（`decisions`）、当前被停用的路由（`benched`）。`error` 指没有任何路由能应答的请求；`routeError` 指单条路由失败，包含被回退链救回来的那些。 |
 
 客户端半边通过这套 API 而不是 settings wire 读写：宿主只向配置类客户端暴露白名单命名空间。
 

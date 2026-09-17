@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   TierRouterAdapter, createDecisionCache, createStats, estimatePromptTokens, lastUserMessage,
   lastUserMessageIndex, lastUserText, isToolResultMessage, turnKeyFor, fingerprintOf,
+  failureCodeOf, failureMessageOf,
   blocksText, failureChunk,
 } from '../lib/router.js'
 import { DEFAULTS } from '../lib/schema.js'
@@ -1264,4 +1265,164 @@ test('stream: a request with no human message is neither classified nor counted 
   assert.equal(decision.turn, false)
   assert.equal(decision.classifier, 'none')
   assert.equal(decision.inputChars, 0)
+})
+
+// ---------- route health: "cannot serve" is not "something went wrong once" ----------
+
+/** An llm whose `brokenModel` always fails with the given failure code. */
+function failingLlm(brokenModel, code, message) {
+  const calls = []
+  const llm = {
+    calls,
+    async prepareCall(config) {
+      calls.push(`${config.provider}/${config.model}`)
+      const broken = config.model === brokenModel
+      return {
+        config: { provider: config.provider, model: config.model },
+        async *stream() {
+          if (broken) {
+            yield { type: 'finish', reason: { kind: 'error', failure: { code, message } } }
+            return
+          }
+          yield { type: 'text-delta', index: 0, text: '[fallback]' }
+        },
+      }
+    },
+  }
+  return llm
+}
+
+const HARD_TEXT = '重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整'
+
+test('failureCodeOf / failureMessageOf: prefer the route failure, fall back to the error', () => {
+  assert.equal(failureCodeOf({ routeFailure: { code: 'QUOTA', message: 'a' }, code: 'IGNORED' }), 'QUOTA')
+  assert.equal(failureCodeOf({ code: 'AUTH' }), 'AUTH')
+  assert.equal(failureCodeOf(new Error('plain')), '')
+  assert.equal(failureCodeOf(undefined), '')
+  assert.equal(failureMessageOf({ routeFailure: { message: 'quota gone' }, message: 'outer' }), 'quota gone')
+  assert.equal(failureMessageOf(new Error('outer')), 'outer')
+  assert.equal(failureMessageOf(undefined), '')
+})
+
+test('route health: a route-level code benches at once, a transient one needs a streak', () => {
+  const router = adapter({ routeFailureThreshold: 2, routeCooldownMs: 60_000 })
+  router.noteRouteFailure('p', 'm', 'QUOTA', 'usage limit reached')
+  assert.equal(router.benchReason('p', 'm').code, 'QUOTA')
+  assert.ok(router.benchReason('p', 'm').secondsLeft > 0)
+
+  // A transport blip is not evidence that the route is broken.
+  router.noteRouteFailure('q', 'm', 'TRANSPORT', 'socket hang up')
+  assert.equal(router.benchReason('q', 'm'), undefined, 'one blip must not bench a route')
+  router.noteRouteFailure('q', 'm', 'TRANSPORT', 'socket hang up')
+  assert.equal(router.benchReason('q', 'm').code, 'TRANSPORT')
+})
+
+test('route health: a success clears the streak, and the bench can be disabled', () => {
+  const router = adapter({ routeFailureThreshold: 2, routeCooldownMs: 60_000 })
+  router.noteRouteFailure('p', 'm', 'TRANSPORT', 'blip')
+  router.noteRouteSuccess('p', 'm')
+  router.noteRouteFailure('p', 'm', 'TRANSPORT', 'blip')
+  assert.equal(router.benchReason('p', 'm'), undefined, 'the streak restarted after the success')
+
+  const off = adapter({ routeFailureThreshold: 1, routeCooldownMs: 0 })
+  off.noteRouteFailure('p', 'm', 'QUOTA', 'usage limit reached')
+  assert.equal(off.benchReason('p', 'm'), undefined, 'routeCooldownMs 0 turns the bench off')
+})
+
+test('route health: a request-specific failure never benches the route', () => {
+  const router = adapter({ routeFailureThreshold: 1, routeCooldownMs: 60_000 })
+  for (let i = 0; i < 3; i += 1) router.noteRouteFailure('p', 'm', 'CONTEXT_WINDOW_EXCEEDED', 'too long')
+  assert.equal(router.benchReason('p', 'm'), undefined, 'the next, smaller request may well fit')
+  router.noteRouteFailure('p', 'm', 'ABORTED', 'user cancelled')
+  assert.equal(router.benchReason('p', 'm'), undefined)
+})
+
+test('route health: a failure older than the window starts a new streak', () => {
+  const router = adapter({ routeFailureThreshold: 2, routeCooldownMs: 60_000 })
+  router.noteRouteFailure('p', 'm', 'TRANSPORT', 'yesterday')
+  router.routeHealth.get('p/m').at = Date.now() - 10 * 60_000
+  router.noteRouteFailure('p', 'm', 'TRANSPORT', 'today')
+  assert.equal(router.benchReason('p', 'm'), undefined, 'two failures an hour apart are not a streak')
+})
+
+test('stream: an exhausted quota benches the route, so the next request skips it', async () => {
+  // The live incident: codex-local's quota is gone, and every request paid the
+  // full multi-minute failure before the fallback answered.
+  const llm = failingLlm('gpt-6-astra', 'QUOTA', 'codex usage limit reached')
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'codex-local', hardModel: 'gpt-6-astra',
+    fallbackProvider: 'deepseek-official', fallbackModel: 'deepseek-chat',
+  }), { stats })
+
+  const first = await collect(router.stream(optionsFor(HARD_TEXT)))
+  assert.deepEqual(llm.calls, ['codex-local/gpt-6-astra', 'deepseek-official/deepseek-chat'])
+  assert.ok(first.some((c) => c.type === 'text-delta' && c.text === '[fallback]'))
+  assert.equal(stats.snapshot().routeError, 1)
+  assert.equal(stats.snapshot().errors[0].code, 'QUOTA', 'the failure code is kept for the card')
+
+  llm.calls.length = 0
+  const second = await collect(router.stream(optionsFor(HARD_TEXT)))
+  assert.deepEqual(llm.calls, ['deepseek-official/deepseek-chat'], 'the benched route must not be tried again')
+  assert.ok(second.some((c) => c.type === 'text-delta' && c.text === '[fallback]'))
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.equal(decision.skipped.length, 1)
+  assert.match(decision.skipped[0], /gpt-6-astra.*QUOTA.*benched/)
+})
+
+test('stream: a transient failure is retried on the next request until it becomes a streak', async () => {
+  const llm = failingLlm('gpt-6-astra', 'TRANSPORT', 'socket hang up')
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'codex-local', hardModel: 'gpt-6-astra',
+    fallbackProvider: 'deepseek-official', fallbackModel: 'deepseek-chat',
+    routeFailureThreshold: 2,
+  }), { stats })
+
+  await collect(router.stream(optionsFor(HARD_TEXT)))
+  llm.calls.length = 0
+  await collect(router.stream(optionsFor(HARD_TEXT)))
+  assert.deepEqual(llm.calls, ['codex-local/gpt-6-astra', 'deepseek-official/deepseek-chat'], 'still only a streak of 1')
+
+  llm.calls.length = 0
+  await collect(router.stream(optionsFor(HARD_TEXT)))
+  assert.deepEqual(llm.calls, ['deepseek-official/deepseek-chat'], 'the third request skips the benched route')
+})
+
+test('stream: a benched route never empties the chain (fail open)', async () => {
+  // Every route benched: the request must still be attempted rather than
+  // turned into a NO_ROUTE error.
+  const llm = failingLlm('nothing-matches', 'QUOTA', 'never used')
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'deepseek-official', hardModel: 'deepseek-chat',
+  }), { stats })
+  router.noteRouteFailure('deepseek-official', 'deepseek-chat', 'QUOTA', 'usage limit reached')
+  assert.ok(router.benchReason('deepseek-official', 'deepseek-chat') !== undefined)
+
+  const chunks = await collect(router.stream(optionsFor(HARD_TEXT)))
+  assert.deepEqual(llm.calls, ['deepseek-official/deepseek-chat'], 'the only route must still be tried')
+  assert.ok(chunks.some((c) => c.type === 'text-delta' && c.text === '[fallback]'))
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.match(decision.skipped.join('; '), /benched/, 'and the card still explains the risk')
+})
+
+test('benchedRoutes: lists what is unavailable right now, seconds first', () => {
+  const router = adapter({ routeFailureThreshold: 1, routeCooldownMs: 60_000 })
+  assert.deepEqual(router.benchedRoutes(), [])
+  router.noteRouteFailure('codex-local', 'gpt-6-astra', 'QUOTA', 'codex usage limit reached')
+  router.noteRouteFailure('gpudev', 'qwen3.8-27b-q5', 'TRANSPORT', 'endpoint down')
+  const benched = router.benchedRoutes()
+  assert.equal(benched.length, 2)
+  assert.equal(benched[0].provider, 'codex-local')
+  assert.equal(benched[0].model, 'gpt-6-astra')
+  assert.equal(benched[0].code, 'QUOTA')
+  assert.equal(benched[0].message, 'codex usage limit reached')
+  assert.ok(benched[0].secondsLeft > 0)
+  // An expired bench is not reported.
+  router.routeHealth.get('gpudev/qwen3.8-27b-q5').until = Date.now() - 1
+  assert.deepEqual(router.benchedRoutes().map((b) => b.provider), ['codex-local'])
 })

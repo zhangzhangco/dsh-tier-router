@@ -51,7 +51,12 @@ export function apply(ctx, config) {
   // Web API for the settings card (web-only service; dynamic inject so the
   // plugin also loads on surfaces without a web server).
   ctx.inject(['webServer'], (webCtx) => {
-    installModelsApi(webCtx, () => stats)
+    // Route health lives on the adapter (it is per route, not per counter), so
+    // the API snapshot composes it in: the card can then show which routes are
+    // benched and why, instead of only the failures that already happened.
+    installModelsApi(webCtx, () => ({
+      snapshot: () => ({ ...stats.snapshot(), benched: router.benchedRoutes() }),
+    }))
   })
 
   return () => {

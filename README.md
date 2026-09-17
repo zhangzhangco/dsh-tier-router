@@ -232,6 +232,40 @@ Two behaviours worth knowing:
   structured evidence, that text replaces the image, and the difficulty tiers produce the answer.
   `route` is the legacy behaviour: the whole turn goes to the vision tier.
 
+## When a model is unavailable
+
+A tier that cannot serve a request is not the same as a tier that failed once. The router reads the
+harness failure code (`HarnessError.code` — the contract is explicit that callers route on the code
+and never parse the message) and reacts differently:
+
+| Failure | Codes | What the router does |
+| --- | --- | --- |
+| **The route cannot serve** | `QUOTA`, `AUTH`, `INVALID_CREDENTIAL`, `MISSING_CREDENTIAL`, `NO_ADAPTER` | Advance the chain **and bench the route** for `routeCooldownMs` (default 5 min). |
+| **Something went wrong once** | `TRANSPORT`, `TIMEOUT`, `SERVER`, `RATE_LIMIT`, `EMPTY_RESPONSE`, unknown | Advance the chain, but bench only after `routeFailureThreshold` (default 2) consecutive failures inside the window. |
+| **About this request, not the route** | `CONTEXT_WINDOW_EXCEEDED`, `ABORTED` | Advance the chain and never bench: the next, smaller request may well fit. |
+
+A benched route is skipped outright — its failure is not paid again — and Settings → Tier Router
+lists it with the code, the message and the seconds until it is retried:
+
+```
+Benched routes (judged unavailable): codex-local/gpt-6-astra — QUOTA (usage limit reached), 274s retry in
+```
+
+Any success clears the route's streak, `routeCooldownMs: 0` turns the bench off, and the bench is
+never allowed to empty the chain: if *every* route is benched the chain is used anyway, with the
+reason kept in the decision's `skipped` list (fail-open, like the context guard).
+
+**The streak rule exists because the code is not always informative.** An exhausted account quota can
+surface as nothing but a connection timeout, because that is all the provider or its CLI ever said —
+measured on a real Codex CLI failure whose entire diagnostic was `Reconnecting... 2/5 (request timed
+out)`. No amount of message parsing recovers a signal that was never emitted, so the router falls
+back to "the same route failed twice in a row".
+
+**The honest limit:** this stops the bleeding from the *second* request onward. The first one still
+waits out whatever the adapter costs before it reports failure, and no failure code can arrive sooner
+than the failure does. Bounding that first request needs a timeout *inside the adapter* (for
+`dsh-llm-codex`, the `timeoutMs` field of its provider entry, default 10 minutes per `codex exec`).
+
 ## HTTP API
 
 The settings card talks to these host endpoints:
@@ -241,7 +275,7 @@ The settings card talks to these host endpoints:
 | `GET` | `/tier-router/api/models` | Model catalog for every provider (image support, reasoning efforts) + current default model. |
 | `GET` | `/tier-router/api/config` | Resolved settings + defaults + writability. |
 | `POST` | `/tier-router/api/config` | Write one field (`{field, value}`); `value: null` resets it. Requires `content-type: application/json` and a same-origin `Origin`/`Host` pair, so a page you merely visit cannot rewrite the routing. |
-| `GET` | `/tier-router/api/stats` | Route counters (`hard`/`normal`/`easy`/`vision`/`visionBridge`/`fallback`/`error`/`routeError`) plus the per-turn counters in `turns`, the recent failure ring in `errors`, and the recent decision ring in `decisions`. `error` counts requests nothing could answer; `routeError` counts individual route failures, including the ones the fallback chain recovered. |
+| `GET` | `/tier-router/api/stats` | Route counters (`hard`/`normal`/`easy`/`vision`/`visionBridge`/`fallback`/`error`/`routeError`) plus the per-turn counters in `turns`, the recent failure ring in `errors`, and the recent decision ring in `decisions`, and the routes currently benched in `benched`. `error` counts requests nothing could answer; `routeError` counts individual route failures, including the ones the fallback chain recovered. |
 
 The client half reads and writes through this API rather than the settings wire, because the host only
 exposes allow-listed namespaces to configuration clients.
