@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   TierRouterAdapter, createDecisionCache, createStats, estimatePromptTokens, lastUserMessage,
+  lastUserMessageIndex, turnKeyFor, fingerprintOf,
   blocksText, failureChunk,
 } from '../lib/router.js'
 import { DEFAULTS } from '../lib/schema.js'
@@ -858,13 +859,13 @@ test('contextWindowOf: a transient failure is retried, a known window is not', a
 // ---------- routing latency: nothing on the critical path may stall ----------
 
 /** An llm whose classifier never answers quickly (models a cold local model). */
-function slowClassifierLlm(delayMs, reply = '{"level": "easy", "reason": "slow"}') {
+function slowClassifierLlm(delayMs, reply = '{"level": "easy", "reason": "slow"}', classifierModel = 'slow-classifier') {
   const calls = []
   const llm = {
     calls,
     async prepareCall(config) {
       calls.push(`${config.provider}/${config.model}`)
-      if (config.model === 'slow-classifier') {
+      if (config.model === classifierModel) {
         return {
           config: { provider: config.provider, model: config.model, maxTokens: config.maxTokens },
           async *stream() {
@@ -948,4 +949,223 @@ test('decision records carry where the routing time went', async () => {
 test('settings: the classifier budget defaults to 4s and is overridable', () => {
   assert.equal(DEFAULTS.classifierTimeoutMs, 4000)
   assert.equal(DEFAULTS.visionTimeoutMs, 60000)
+})
+
+// ---------- auditability: which denominator, and why this level ----------
+
+test('createStats: recordTurn counts a turn once, whatever the key repeats', () => {
+  const stats = createStats()
+  assert.equal(stats.recordTurn('s1#0', 'normal', false), true)
+  assert.equal(stats.recordTurn('s1#0', 'normal', false), false, 'the same turn must not be counted twice')
+  assert.equal(stats.recordTurn('s1#0', 'hard', false), false, 'a re-classification inside the turn is still the same turn')
+  assert.equal(stats.recordTurn('s1#2', 'hard', false), true, 'a new user message starts a new turn')
+  assert.equal(stats.recordTurn('s2#0', 'easy', false), true, 'another session at the same index is another turn')
+  assert.equal(stats.recordTurn(undefined, 'easy', false), true, 'an unidentifiable turn still counts')
+  assert.equal(stats.recordTurn(undefined, 'easy', false), true)
+  const snapshot = stats.snapshot()
+  assert.equal(snapshot.turns.total, 5)
+  assert.equal(snapshot.turns.normal, 1)
+  assert.equal(snapshot.turns.hard, 1)
+  assert.equal(snapshot.turns.easy, 3)
+  // The per-request counters are a different denominator and stay untouched.
+  assert.equal(snapshot.hard + snapshot.normal + snapshot.easy, 0)
+})
+
+test('createStats: a vision turn is counted as a vision turn, not as a level', () => {
+  const stats = createStats()
+  stats.recordTurn('s1#0', 'normal', true)
+  const snapshot = stats.snapshot()
+  assert.equal(snapshot.turns.vision, 1)
+  assert.equal(snapshot.turns.normal, 0)
+  assert.equal(snapshot.normal, 0)
+})
+
+test('createStats: snapshot copies the turn counters', () => {
+  const stats = createStats()
+  const snapshot = stats.snapshot()
+  snapshot.turns.total = 99
+  assert.equal(stats.snapshot().turns.total, 0, 'mutating a snapshot must not reach the counters')
+})
+
+test('createStats: a recovered route failure is no longer reported as zero errors', () => {
+  const stats = createStats()
+  stats.recordError('p/m', 'boom')
+  const snapshot = stats.snapshot()
+  // `error` stays reserved for requests nothing could answer...
+  assert.equal(snapshot.error, 0)
+  // ...but the failure the fallback chain recovered is visible on its own.
+  assert.equal(snapshot.routeError, 1)
+  assert.equal(snapshot.errors.length, 1)
+})
+
+test('fingerprintOf: stable, 8 hex chars, sensitive to content', () => {
+  assert.match(fingerprintOf('继续'), /^[0-9a-f]{8}$/)
+  assert.equal(fingerprintOf('继续'), fingerprintOf('继续'))
+  assert.notEqual(fingerprintOf('继续'), fingerprintOf('继续修复'))
+  assert.equal(fingerprintOf(undefined), fingerprintOf(''))
+})
+
+test('lastUserMessageIndex / turnKeyFor: index and session identify the turn', () => {
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'one' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    { role: 'tool', content: [{ type: 'tool-result', content: [{ type: 'text', text: 'out' }] }] },
+  ]
+  // A tool step appends messages but does not move the last user message.
+  assert.equal(lastUserMessageIndex(messages), 0)
+  assert.equal(turnKeyFor({ messages, sessionId: 's1' }), 's1#0')
+  const grown = [...messages, { role: 'assistant', content: [{ type: 'text', text: 'more' }] }]
+  assert.equal(turnKeyFor({ messages: grown, sessionId: 's1' }), 's1#0', 'a tool step is the same turn')
+  const next = [...grown, { role: 'user', content: [{ type: 'text', text: 'two' }] }]
+  assert.equal(turnKeyFor({ messages: next, sessionId: 's1' }), 's1#4', 'a new message is a new turn')
+  assert.equal(turnKeyFor({ messages: next, sessionId: 's2' }), 's2#4')
+  assert.equal(turnKeyFor({ messages: [] }), undefined)
+  assert.equal(turnKeyFor({}), undefined)
+  assert.equal(lastUserMessageIndex(undefined), -1)
+})
+
+test('recordDecision: carries the diagnosis, with safe defaults and caps', () => {
+  const stats = createStats()
+  stats.recordDecision({
+    level: 'normal', cause: 'x'.repeat(400), classifier: 'heuristic',
+    turn: true, fingerprint: 'abcdef0123456789', inputChars: 85.6,
+  })
+  stats.recordDecision({ level: 'easy' })
+  const [full, bare] = stats.snapshot().decisions
+  assert.equal(full.cause.length, 240, 'cause is capped before it reaches the card')
+  assert.equal(full.classifier, 'heuristic')
+  assert.equal(full.turn, true)
+  assert.equal(full.fingerprint, 'abcdef0123456789')
+  assert.equal(full.inputChars, 86)
+  assert.equal(bare.cause, '')
+  assert.equal(bare.classifier, '')
+  assert.equal(bare.turn, false)
+  assert.equal(bare.fingerprint, '')
+  assert.equal(bare.inputChars, 0)
+})
+
+test('stats: an agent tool loop counts many requests but one human turn', async () => {
+  const llm = fakeLlm({ 'deepseek-official/deepseek-chat': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    normalProvider: 'deepseek-official', normalModel: 'deepseek-chat',
+    fallbackProvider: 'deepseek-official', fallbackModel: 'deepseek-chat',
+  }), { stats })
+  const request = (messages) => ({ provider: 'tier-router', model: 'smart', messages, sessionId: 's1' })
+  const first = [{ role: 'user', content: [{ type: 'text', text: '帮我改一下 index.js 里的日志级别' }] }]
+  for (let step = 0; step < 4; step += 1) {
+    const messages = [...first]
+    for (let i = 0; i < step; i += 1) {
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: `step ${i}` }] })
+      messages.push({ role: 'tool', content: [{ type: 'tool-result', content: [{ type: 'text', text: 'ok' }] }] })
+    }
+    await collect(router.stream(request(messages)))
+  }
+  const looped = stats.snapshot()
+  assert.equal(looped.normal, 4, 'the per-request counter counts every step')
+  assert.equal(looped.turns.total, 1, 'but four steps of one loop are one turn')
+  assert.equal(looped.turns.normal, 1)
+
+  // A new user message moves the last-user-message index → a new turn.
+  const second = [
+    ...first,
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    { role: 'user', content: [{ type: 'text', text: '再改一处' }] },
+  ]
+  await collect(router.stream(request(second)))
+  const after = stats.snapshot()
+  assert.equal(after.turns.total, 2)
+  assert.equal(after.decisions.at(-1).turn, true, 'the decision marks the turn boundary')
+  assert.equal(after.decisions.at(-2).turn, false, 'and a mid-loop step does not')
+})
+
+test('stream: the decision says which classifier decided, and whether it was cached', async () => {
+  const llm = slowClassifierLlm(0, '{"level": "easy", "reason": "small talk"}', 'fast-classifier')
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    classifier: 'llm',
+    llmClassifierProvider: 'p', llmClassifierModel: 'fast-classifier',
+    easyProvider: 'p', easyModel: 'easy-target',
+    normalProvider: 'p', normalModel: 'normal-target',
+  }), { stats })
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  const first = stats.snapshot().decisions.at(-1)
+  assert.equal(first.classifier, 'llm')
+  assert.equal(first.cause, 'small talk', "the classifier's own reason is what the card shows")
+  assert.equal(first.turn, true)
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  const second = stats.snapshot().decisions.at(-1)
+  assert.equal(second.classifier, 'llm-cache')
+  assert.equal(second.turn, false, 'the cached repeat is the same turn')
+})
+
+test('stream: a timed-out classifier is attributed, not silently absorbed', async () => {
+  const llm = slowClassifierLlm(2000, '{"level": "easy", "reason": "slow"}')
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    classifier: 'llm',
+    llmClassifierProvider: 'p', llmClassifierModel: 'slow-classifier',
+    classifierTimeoutMs: 30,
+    hardProvider: 'p', hardModel: 'hard-target',
+  }), { stats })
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.equal(decision.classifier, 'llm-timeout')
+  assert.match(decision.cause, /too slow/)
+  assert.match(decision.cause, /heuristic/)
+  assert.ok(decision.inputChars > 0, 'the heuristic read the whole message')
+})
+
+test('stream: an unconfigured classifier is attributed rather than assumed', async () => {
+  const llm = fakeLlm({ 'deepseek-official/deepseek-v4-pro': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    classifier: 'llm', // but no llmClassifier* and no easy tier → no route at all
+    hardProvider: 'deepseek-official', hardModel: 'deepseek-v4-pro',
+  }), { stats })
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.equal(decision.classifier, 'llm-unavailable')
+  assert.match(decision.cause, /no classifier model configured/)
+})
+
+test('stream: the heuristic classifier names itself and its scoring reason', async () => {
+  const llm = fakeLlm({ 'deepseek-official/deepseek-v4-pro': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'deepseek-official', hardModel: 'deepseek-v4-pro',
+  }), { stats })
+  await collect(router.stream(optionsFor(CLASSIFIED)))
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.equal(decision.classifier, 'heuristic')
+  assert.match(decision.cause, /hard signal/)
+  assert.equal(decision.fingerprint, fingerprintOf(CLASSIFIED))
+  assert.equal(decision.inputChars, CLASSIFIED.length)
+})
+
+test('stream: the decision exposes how little text the classifier actually read', async () => {
+  // A request carrying tens of thousands of tokens whose entire classification
+  // input is a two-character continuation. That mismatch is the diagnosis, so
+  // the card has to be able to show it.
+  const llm = fakeLlm({ 'deepseek-official/deepseek-chat': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    normalProvider: 'deepseek-official', normalModel: 'deepseek-chat',
+  }), { stats })
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: '继续' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+    { role: 'tool', content: [{ type: 'tool-result', content: [{ type: 'text', text: 'x'.repeat(70000) }] }] },
+  ]
+  await collect(router.stream({ provider: 'tier-router', model: 'smart', messages, sessionId: 's1' }))
+  const decision = stats.snapshot().decisions.at(-1)
+  assert.equal(decision.level, 'easy', 'a two-character continuation still scores as easy')
+  assert.equal(decision.inputChars, 2, 'the decision reports the two characters it judged')
+  assert.ok(decision.estimate > 15000, 'while the request itself carries tens of thousands of tokens')
 })

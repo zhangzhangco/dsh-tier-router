@@ -89,10 +89,38 @@ requests, newest first, each showing the model that answered, the classified tie
 request size, and why that route won:
 
 ```
-21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok  ·  hard tier
-21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok  ·  easy tier
-21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok  ·  normal tier  ·  skipped (window too small) gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
+21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok (decided from 92 chars)  ·  by heuristic  ·  new turn  ·  hard tier  ·  why: 3 hard signal(s)
+21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok (decided from 2 chars)  ·  by heuristic  ·  same turn  ·  easy tier  ·  why: social signal(s) in short message
+21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok (decided from 41 chars)  ·  by llm-cache  ·  same turn  ·  normal tier  ·  skipped (window too small) gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
 ```
+
+Three fields exist specifically to make a surprising tier explainable:
+
+- **`by <classifier>`** — which classifier produced the level: `llm`, `llm-cache`, `heuristic`,
+  `llm-timeout`, `llm-error` or `llm-unavailable`. A tier that came from the heuristic because the
+  LLM classifier timed out or was never configured says so instead of being indistinguishable from a
+  real classification.
+- **`why: …`** — the classifier's own one-sentence reason, or the heuristic's scoring reasons. The
+  route reason (`normal tier`) answers *where* the request went; this answers *why* it was judged
+  that way.
+- **`decided from N chars`** next to the token estimate — the classifier reads only the latest user
+  message (bounded to 2000 chars), while the request carries the whole history. When those two
+  numbers are far apart, the tier was decided from a small fraction of the request, which is the
+  usual explanation for a level that looks wrong.
+
+### Two denominators, on purpose
+
+The counters row counts **requests**; the `Per turn` line below it counts **human turns**.
+
+Inside an agent loop one human message is re-sent on every tool step, and the classification is
+cached per message text, so every step of a turn shares one level. A per-request count is therefore
+weighted by how many steps a task happened to take — it mostly measures loop length, not the mix of
+work. A turn is identified by the last user message (its session plus its index in the request), so a
+five-step tool loop is one turn and a follow-up message is the next one.
+
+Read the per-turn line to judge whether the difficulty mix is reasonable; read the per-request line
+to see how much traffic each tier actually served. When the two disagree sharply, the request
+denominator is being dominated by a few long loops.
 
 The `skipped` note is the context guard at work: that tier was passed over because its model could not
 hold the request. The same data is on the stats endpoint:
@@ -213,7 +241,7 @@ The settings card talks to these host endpoints:
 | `GET` | `/tier-router/api/models` | Model catalog for every provider (image support, reasoning efforts) + current default model. |
 | `GET` | `/tier-router/api/config` | Resolved settings + defaults + writability. |
 | `POST` | `/tier-router/api/config` | Write one field (`{field, value}`); `value: null` resets it. Requires `content-type: application/json` and a same-origin `Origin`/`Host` pair, so a page you merely visit cannot rewrite the routing. |
-| `GET` | `/tier-router/api/stats` | Route counters and recent failures. |
+| `GET` | `/tier-router/api/stats` | Route counters (`hard`/`normal`/`easy`/`vision`/`visionBridge`/`fallback`/`error`/`routeError`) plus the per-turn counters in `turns`, the recent failure ring in `errors`, and the recent decision ring in `decisions`. `error` counts requests nothing could answer; `routeError` counts individual route failures, including the ones the fallback chain recovered. |
 
 The client half reads and writes through this API rather than the settings wire, because the host only
 exposes allow-listed namespaces to configuration clients.

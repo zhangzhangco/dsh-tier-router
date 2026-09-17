@@ -2,6 +2,32 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { installModelsApi } from '../lib/models-api.js'
 import { DEFAULTS } from '../lib/schema.js'
+import { TierRouterAdapter, createStats } from '../lib/router.js'
+
+/** Drain a router stream (these tests only care about the side effects). */
+async function collect(stream) {
+  const chunks = []
+  for await (const chunk of stream) chunks.push(chunk)
+  return chunks
+}
+
+/**
+ * Every route blank, so a test states exactly which tiers it configures and
+ * never leans on the shipped defaults (those point at the author's own routes).
+ */
+function routerSettings(overrides = {}) {
+  return {
+    ...DEFAULTS,
+    hardProvider: '', hardModel: '', hardEffort: '',
+    normalProvider: '', normalModel: '', normalEffort: '',
+    easyProvider: '', easyModel: '', easyEffort: '',
+    visionProvider: '', visionModel: '', visionEffort: '',
+    visionFallbacks: [],
+    fallbackProvider: '', fallbackModel: '',
+    classifier: 'heuristic',
+    ...overrides,
+  }
+}
 
 /** Minimal Node http req/res fakes for the webServer handler. */
 function fakeReq(method, path, body, headers = {}) {
@@ -247,4 +273,111 @@ test("config POST still accepts the settings card's own same-origin request", as
   )
   assert.equal(res.status, 200)
   assert.equal(settings.writes.length, 1)
+})
+
+// ---------- the stats endpoint carries the diagnosis, not just the counters ----------
+
+test('stats GET exposes the per-turn counters and the classification diagnosis', async () => {
+  // Exercised end to end: a real adapter feeds a real createStats(), the
+  // endpoint serialises it. The point of 0.2.2 is that this payload can answer
+  // "why was this tier chosen, and on which denominator", so the contract is
+  // asserted at the HTTP boundary rather than only on the internal object.
+  const stats = createStats()
+  const calls = []
+  const llm = {
+    async prepareCall(config) {
+      calls.push(`${config.provider}/${config.model}`)
+      return {
+        config: { provider: config.provider, model: config.model },
+        async *stream() {
+          yield { type: 'text-delta', index: 0, text: `[${config.provider}/${config.model}]` }
+        },
+      }
+    },
+  }
+  const ctx = {
+    get: () => undefined,
+    llm,
+    logger: { info: () => {} },
+  }
+  const router = new TierRouterAdapter(ctx, () => routerSettings({
+    normalProvider: 'deepseek-official', normalModel: 'deepseek-chat',
+    fallbackProvider: 'deepseek-official', fallbackModel: 'deepseek-chat',
+  }), { stats })
+
+  const first = [{ role: 'user', content: [{ type: 'text', text: '帮我改一下 index.js 里的日志级别' }] }]
+  await collect(router.stream({ provider: 'tier-router', model: 'smart', messages: first, sessionId: 's1' }))
+  await collect(router.stream({
+    provider: 'tier-router',
+    model: 'smart',
+    sessionId: 's1',
+    messages: [...first, { role: 'assistant', content: [{ type: 'text', text: 'step' }] }],
+  }))
+  const second = [
+    ...first,
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    { role: 'user', content: [{ type: 'text', text: '再把 README 补一下' }] },
+  ]
+  await collect(router.stream({ provider: 'tier-router', model: 'smart', messages: second, sessionId: 's1' }))
+
+  const captured = {}
+  ctx.webServer = { register: ({ handler }) => { captured.handler = handler; return () => {} } }
+  installModelsApi(ctx, () => stats)
+  const res = await invoke(captured.handler, fakeReq('GET', '/tier-router/api/stats'), fakeRes())
+
+  assert.equal(res.status, 200)
+  const payload = res.json.stats
+  // Per-request vs per-turn are both present and genuinely differ: three
+  // requests, two turns.
+  assert.equal(payload.normal, 3)
+  assert.equal(payload.turns.total, 2)
+  assert.equal(payload.turns.normal, 2)
+  assert.equal(payload.routeError, 0)
+
+  const last = payload.decisions.at(-1)
+  assert.equal(last.classifier, 'heuristic')
+  assert.match(last.cause, /score|signal/, 'the scoring reason must survive serialisation')
+  assert.equal(last.turn, true, 'the follow-up message opened a new turn')
+  assert.match(last.fingerprint, /^[0-9a-f]{8}$/)
+  assert.ok(last.inputChars > 0)
+})
+
+test('stats GET reports a recovered route failure without calling the request an error', async () => {
+  const stats = createStats()
+  const llm = {
+    async prepareCall(config) {
+      const failing = config.model === 'broken'
+      return {
+        config: { provider: config.provider, model: config.model },
+        async *stream() {
+          if (failing) {
+            yield { type: 'finish', reason: { kind: 'error', failure: { message: 'boom', code: 'TRANSPORT' } } }
+            return
+          }
+          yield { type: 'text-delta', index: 0, text: 'answered by the fallback' }
+        },
+      }
+    },
+  }
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => routerSettings({
+    normalProvider: 'p', normalModel: 'broken',
+    fallbackProvider: 'p', fallbackModel: 'deepseek-chat',
+  }), { stats })
+  await collect(router.stream({
+    provider: 'tier-router',
+    model: 'smart',
+    messages: [{ role: 'user', content: [{ type: 'text', text: '帮我改一下 index.js 里的日志级别' }] }],
+  }))
+
+  const captured = {}
+  ctx.webServer = { register: ({ handler }) => { captured.handler = handler; return () => {} } }
+  installModelsApi(ctx, () => stats)
+  const res = await invoke(captured.handler, fakeReq('GET', '/tier-router/api/stats'), fakeRes())
+
+  const payload = res.json.stats
+  assert.equal(payload.error, 0, 'the request was answered, so it is not an unrecovered error')
+  assert.equal(payload.routeError, 1, 'but the failure itself must be visible')
+  assert.equal(payload.errors.length, 1)
+  assert.equal(payload.fallback, 1)
 })

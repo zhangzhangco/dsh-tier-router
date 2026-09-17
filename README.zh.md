@@ -78,10 +78,33 @@ dsh plugin --profile web add dsh-tier-router@latest
 每条都显示：实际作答的模型、判定的档位、本次请求的估算长度、以及为什么走这条路由：
 
 ```
-21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok  ·  hard tier
-21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok  ·  easy tier
-21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok  ·  normal tier  ·  跳过（上下文不够） gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
+21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok（判据文本 92 字）  ·  由 heuristic  ·  新回合  ·  hard tier  ·  判据: 3 hard signal(s)
+21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok（判据文本 2 字）  ·  由 heuristic  ·  同回合续跑  ·  easy tier  ·  判据: social signal(s) in short message
+21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok（判据文本 41 字）  ·  由 llm-cache  ·  同回合续跑  ·  normal tier  ·  跳过（上下文不够） gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
 ```
+
+有三个字段是专门为了让「档位为什么是这样」可解释而存在的：
+
+- **`由 <分类器>`** —— 这一档是哪个分类器给出的：`llm`、`llm-cache`、`heuristic`、`llm-timeout`、
+  `llm-error`、`llm-unavailable`。因 LLM 分类器超时或压根没配而回退到启发式的判定，会明确标出来，
+  不再和真实分类结果长得一模一样。
+- **`判据: …`** —— LLM 分类器自己给的一句话理由，或启发式的打分依据。路由原因（`normal tier`）
+  回答的是「去了哪一档」，这里回答的是「为什么判成这一档」。
+- **`判据文本 N 字`**（跟在 token 估算后面）—— 分类器只读最后一条用户消息（上限 2000 字符），
+  而请求本身携带全部历史。两个数字差得越远，说明这一档是从整条请求里极小的一部分判出来的 ——
+  这通常是「档位看起来不对」的真正原因。
+
+### 两套分母，故意的
+
+计数器那一行统计的是**请求数**；下面「按回合」那一行统计的是**人类回合数**。
+
+在 agent 循环里，一条人类消息会在每个工具步骤重新发送一次，而分类结果按消息文本缓存，所以
+同一回合的每一步都共用同一个档位。于是「按请求」计数会被任务恰好走了多少步加权 —— 它主要衡量的是
+循环长度，不是工作量的难度构成。回合的身份用最后一条用户消息标识（会话 + 它在请求里的下标），
+所以五步工具循环算一个回合，用户再发一条消息才算下一个回合。
+
+判断「难度分布是否合理」看「按回合」那一行；想知道每一档实际承接了多少流量看「按请求」那一行。
+两者差别很大时，说明请求口径正被少数几个长循环主导。
 
 其中「跳过」就是上下文感知在起作用：那一档因为模型装不下本次请求而被略过。同样的数据也在 stats 接口上：
 
@@ -191,7 +214,7 @@ tier-router:
 | `GET` | `/tier-router/api/models` | 全部 provider 的模型目录（图片能力、推理强度）+ 当前默认模型。 |
 | `GET` | `/tier-router/api/config` | 解析后的配置 + 默认值 + 是否可写。 |
 | `POST` | `/tier-router/api/config` | 写入单个字段（`{field, value}`）；`value: null` 恢复默认。要求 `content-type: application/json` 且 `Origin`/`Host` 同源，因此你随便访问的网页无法改写路由配置。 |
-| `GET` | `/tier-router/api/stats` | 路由计数与最近失败。 |
+| `GET` | `/tier-router/api/stats` | 路由计数（`hard`/`normal`/`easy`/`vision`/`visionBridge`/`fallback`/`error`/`routeError`）、按回合计数（`turns`）、最近失败环形缓冲（`errors`）、最近决策环形缓冲（`decisions`）。`error` 指没有任何路由能应答的请求；`routeError` 指单条路由失败，包含被回退链救回来的那些。 |
 
 客户端半边通过这套 API 而不是 settings wire 读写：宿主只向配置类客户端暴露白名单命名空间。
 

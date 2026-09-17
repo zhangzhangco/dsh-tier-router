@@ -87,13 +87,21 @@ window.__ModuleLoader__.load({
       'stats.vision': '视觉档',
       'stats.visionBridge': '视觉分析',
       'stats.fallback': '回退接管',
-      'stats.error': '错误',
+      'stats.error': '未恢复错误',
+      'stats.routeError': '路由失败(已回退)',
+      'stats.turns': '按回合',
+      'stats.turnsTotal': '回合合计',
       decisions: '最近路由决策（每次请求选了哪个模型）',
       'decisions.failed': '全部失败',
       'decisions.tried': '先试过',
       'decisions.overhead': '路由耗时',
       'decisions.classify': '其中分类',
       'decisions.skipped': '跳过（上下文不够）',
+      'decisions.cause': '判据',
+      'decisions.by': '由',
+      'decisions.turn': '新回合',
+      'decisions.continuation': '同回合续跑',
+      'decisions.input': '判据文本',
       contextGuard: '上下文感知（跳过装不下的模型）',
       'contextGuard.hint': '开启后，若某档位模型的上下文窗口小于本次请求的估算长度，会跳过它并改用装得下的档位；'
         + '窗口未知的模型不会被跳过。估算按 CJK 1 字≈1 token、其它 3.5 字符≈1 token，并预留 10% 余量。',
@@ -163,13 +171,21 @@ window.__ModuleLoader__.load({
       'stats.vision': 'Vision tier',
       'stats.visionBridge': 'Vision analyses',
       'stats.fallback': 'Fallbacks',
-      'stats.error': 'Errors',
+      'stats.error': 'Unrecovered errors',
+      'stats.routeError': 'Route failures (recovered)',
+      'stats.turns': 'Per turn',
+      'stats.turnsTotal': 'turns',
       decisions: 'Recent routing decisions (which model handled each request)',
       'decisions.failed': 'all routes failed',
       'decisions.tried': 'tried',
       'decisions.overhead': 'routing',
       'decisions.classify': 'classify',
       'decisions.skipped': 'skipped (window too small)',
+      'decisions.cause': 'why',
+      'decisions.by': 'by',
+      'decisions.turn': 'new turn',
+      'decisions.continuation': 'same turn',
+      'decisions.input': 'decided from',
       contextGuard: 'Context-aware routing (skip models that cannot hold the request)',
       'contextGuard.hint': 'When on, a tier whose model context window is smaller than the estimated request '
         + 'length is skipped in favour of a tier that fits. Models with an unknown window are never skipped. '
@@ -440,6 +456,13 @@ window.__ModuleLoader__.load({
         tried: Array.isArray(d?.tried) ? d.tried : [],
         skipped: Array.isArray(d?.skipped) ? d.skipped : [],
         estimate: Number.isFinite(d?.estimate) ? d.estimate : 0,
+        // Why this level was decided, and by which classifier. Absent on a
+        // server older than 0.2.2 — degrade to empty strings, never throw.
+        cause: String(d?.cause ?? ''),
+        classifier: String(d?.classifier ?? ''),
+        turn: d?.turn === true,
+        fingerprint: String(d?.fingerprint ?? ''),
+        inputChars: Number.isFinite(d?.inputChars) ? d.inputChars : 0,
         // Routing overhead: everything spent before the chosen model was
         // called. The number to look at when routing "feels slow".
         overheadMs: Number.isFinite(d?.timings?.overheadMs) ? d.timings.overheadMs : 0,
@@ -732,10 +755,28 @@ window.__ModuleLoader__.load({
                 h('span', { style: S.stat }, `${t('stats.visionBridge')} ${stats.visionBridge ?? 0}`),
                 h('span', { style: S.stat }, `${t('stats.fallback')} ${stats.fallback ?? 0}`),
                 h('span', { style: S.stat }, `${t('stats.error')} ${stats.error ?? 0}`),
+                // Failures the fallback chain recovered: the ring below lists
+                // them, so counting them only under "unrecovered" made the
+                // card read "0 errors" next to a visible error list.
+                h('span', { style: S.stat }, `${t('stats.routeError')} ${stats.routeError ?? 0}`),
               )
             : null,
           catalogError ? h('span', { style: { ...S.stat, color: 'rgba(220,80,80,1)' } }, t('loadError')) : null,
         ),
+        // The per-request counters above are dominated by the agent tool loop:
+        // one human turn re-sends the same classified message on every step, so
+        // they mostly measure how many steps a task took. This line is the
+        // denominator that answers "is the difficulty mix reasonable?".
+        stats !== null && stats.turns
+          ? h('div', { style: { ...S.stat, marginTop: 4 } },
+              `${t('stats.turns')}: `,
+              `${t('stats.hard')} ${stats.turns.hard ?? 0}  `,
+              `${t('stats.normal')} ${stats.turns.normal ?? 0}  `,
+              `${t('stats.easy')} ${stats.turns.easy ?? 0}  `,
+              `${t('stats.vision')} ${stats.turns.vision ?? 0}  `,
+              `${t('stats.turnsTotal')} ${stats.turns.total ?? 0}`,
+            )
+          : null,
         // Which model actually handled each recent request. The host keeps a
         // bounded ring (newest last); show newest first, capped for width.
         h('div', { style: { marginTop: 12 } },
@@ -752,6 +793,13 @@ window.__ModuleLoader__.load({
                   : `${d.provider}/${d.model}${d.effort !== '' ? ` @${d.effort}` : ''}`,
                 d.level !== '' ? `  ·  ${d.level}` : '',
                 d.estimate > 0 ? `  ·  ~${Math.round(d.estimate / 1000)}k tok` : '',
+                // The mismatch that explains most surprising levels: how much
+                // text the classifier actually read vs how big the request is.
+                d.inputChars > 0 ? ` (${t('decisions.input')} ${d.inputChars} chars)` : '',
+                d.classifier !== '' ? `  ·  ${t('decisions.by')} ${d.classifier}` : '',
+                // Same turn = another tool step of the message above it, not a
+                // new human request. Makes the agent loop visible at a glance.
+                stats?.turns ? `  ·  ${t(d.turn ? 'decisions.turn' : 'decisions.continuation')}` : '',
                 d.overheadMs > 0
                   ? `  ·  ${t('decisions.overhead')} ${(d.overheadMs / 1000).toFixed(2)}s` +
                     (d.classifyMs >= 50 ? ` (${t('decisions.classify')} ${(d.classifyMs / 1000).toFixed(1)}s)` : '')
@@ -759,6 +807,7 @@ window.__ModuleLoader__.load({
                 d.tried.length > 0 ? `  ·  ${t('decisions.tried')} ${d.tried.join(' → ')}` : '',
                 d.skipped.length > 0 ? `  ·  ${t('decisions.skipped')} ${d.skipped.join('; ')}` : '',
                 d.reason !== '' ? `  ·  ${d.reason}` : '',
+                d.cause !== '' ? `  ·  ${t('decisions.cause')}: ${d.cause}` : '',
               )),
         ),
       )

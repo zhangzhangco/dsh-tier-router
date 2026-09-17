@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.2.2] - 2026-09-17
+
+The routing counters could not answer "is this difficulty mix reasonable?", and nothing on the card
+said why a tier had been chosen. Both are fixed; 13 new tests (115 → 128).
+
+### Added
+
+- **Per-turn counters (`turns`), next to the per-request ones.** An agent loop re-sends the same
+  classified message on every tool step, and the classification is cached by message text, so
+  counting requests measures loop length rather than the mix of work: with the old counters a
+  four-step loop plus a follow-up read as five samples of one task. A turn is now identified by the
+  last user message (session + its index in the request), so the settings card can show the
+  denominator that actually answers the question. Both are kept and labelled — a request count is
+  still the right number for "how much traffic did each tier serve".
+- **`by <classifier>` on every decision**: `llm`, `llm-cache`, `heuristic`, `llm-timeout`,
+  `llm-error` or `llm-unavailable`. Previously a level that came from the heuristic because the LLM
+  classifier had timed out, failed, or was never configured was indistinguishable from a real
+  classification.
+- **`why: …` on every decision**: the classifier's own one-sentence reason, or the heuristic's
+  scoring reasons. `resolveChain` had always computed this `cause` and `recordDecision` had never
+  written it, so the card showed the route reason (`normal tier`) and nothing about the judgement.
+- **`decided from N chars` next to the token estimate.** The classifier reads only the latest user
+  message (bounded to 2000 characters) while the request carries the whole history; putting the two
+  numbers side by side makes a tier decided from 2 characters out of a 39k-token request visible
+  instead of inexplicable.
+- `fingerprint`: a stable hash of the classification input, so identical inputs are recognisable
+  across decisions. `GET /tier-router/api/stats` exposes all of the above.
+
+### Fixed
+
+- **A recovered route failure was reported as zero errors.** `recordError` wrote the failure ring
+  but never touched `counts.error`, which only counts requests nothing could answer — so the card
+  read `Errors 0` directly above a list of four failures. The failures now also increment
+  `routeError`, and the two counters are labelled `Unrecovered errors` and `Route failures
+  (recovered)`.
+
+### Changed
+
+- `classifyWithLlm` resolves to `{ level, reason, source }` instead of `undefined` on failure, so
+  the caller reports how the level was reached rather than guessing it back from the elapsed time.
+
 ## [0.2.1] - 2026-09-16
 
 Four defects found by reading the code, all with regression tests (99 → 111).
