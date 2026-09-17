@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.1] - 2026-09-17
+
+Injected context is a user-role message too, and it was the one being classified.
+
+### Fixed
+
+- **The classifier was reading agent-loop snapshots instead of the human's message.** 0.2.3 taught
+  `lastUserText` to skip tool results (also `role: 'user'`), but dsh-llm has a third user-role
+  producer: plugin-injected context — `instructions`, `catalog`, `snapshot`, `notice`, `relay`,
+  `recall` — created with `createUserMessage({ source: { kind: 'plugin', form: 'snapshot' } })`. The
+  agent loop appends a fresh `snapshot` after every turn, so the backwards search landed on injected
+  state. The live symptom was an LLM classifier answering
+  *"No explicit request text is shown; the surrounding context suggests a small follow-up feature, so
+  default to normal"* against a 2000-character input, on every request of the turn.
+  Identification is now **positive**: the human message is the one whose `source.kind === 'user'`,
+  which is what the client connection tags a typed prompt with. A recognised non-human source is
+  always rejected; an absent source (hand-built requests) still falls back to structure.
+- `isHumanMessage` is exported.
+
+### Notes
+
+- This also makes the turn identity correct in the presence of injected context: the human message's
+  index no longer moves when the loop appends a snapshot, so `turns` and `same turn` stay right.
+
+4 new tests (146 -> 150).
+
 ## [0.3.0] - 2026-09-17
 
 A tier that cannot serve a request is not a tier that failed once. The router now reacts to the

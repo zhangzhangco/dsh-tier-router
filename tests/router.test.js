@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   TierRouterAdapter, createDecisionCache, createStats, estimatePromptTokens, lastUserMessage,
-  lastUserMessageIndex, lastUserText, isToolResultMessage, turnKeyFor, fingerprintOf,
+  lastUserMessageIndex, lastUserText, isToolResultMessage, isHumanMessage, turnKeyFor, fingerprintOf,
   failureCodeOf, failureMessageOf,
   blocksText, failureChunk,
 } from '../lib/router.js'
@@ -1425,4 +1425,87 @@ test('benchedRoutes: lists what is unavailable right now, seconds first', () => 
   // An expired bench is not reported.
   router.routeHealth.get('gpudev/qwen3.8-27b-q5').until = Date.now() - 1
   assert.deepEqual(router.benchedRoutes().map((b) => b.provider), ['codex-local'])
+})
+
+// ---------- injected context is role 'user' too: only the human message counts ----------
+
+test('isHumanMessage: role "user" alone is not enough', () => {
+  // The human, as dsh-client-connection tags it.
+  assert.equal(isHumanMessage({ role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }), true)
+  // A tool result: role 'user', source 'tool'.
+  assert.equal(isHumanMessage({ role: 'user', content: [{ type: 'tool-result', content: [] }], source: { kind: 'tool' } }), false)
+  // Plugin-injected context: role 'user', source 'plugin' — the agent loop
+  // appends a `snapshot` after every turn.
+  assert.equal(isHumanMessage({
+    role: 'user',
+    content: [{ type: 'text', text: 'AGENT SNAPSHOT …' }],
+    source: { kind: 'plugin', plugin: 'agent-loop', form: 'snapshot' },
+  }), false)
+  assert.equal(isHumanMessage({
+    role: 'user',
+    content: [{ type: 'text', text: '[model changed: …]' }],
+    source: { kind: 'plugin', plugin: 'model-selection', form: 'notice' },
+  }), false)
+  // Model output is never the human message.
+  assert.equal(isHumanMessage({ role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model' } }), false)
+  // Hand-built requests carry no source: structure decides.
+  assert.equal(isHumanMessage({ role: 'user', content: [{ type: 'text', text: 'hi' }] }), true)
+  assert.equal(isHumanMessage({ role: 'user', content: [{ type: 'tool-result', content: [] }] }), false)
+  assert.equal(isHumanMessage(undefined), false)
+})
+
+test('lastUserText: injected context after the human message does not hide it', () => {
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: '给同步脚本加个 --dry-run' }], source: { kind: 'user' } },
+    { role: 'assistant', content: [{ type: 'text', text: '好的' }], source: { kind: 'model' } },
+    {
+      role: 'user',
+      content: [{ type: 'text', text: `AGENT SNAPSHOT\n${'x'.repeat(3000)}` }],
+      source: { kind: 'plugin', plugin: 'agent-loop', form: 'snapshot', sections: [] },
+    },
+  ]
+  const { text, index } = lastUserText(messages)
+  assert.equal(text, '给同步脚本加个 --dry-run')
+  assert.equal(index, 0)
+})
+
+test('stream: the tier comes from the human message, not from the injected snapshot', async () => {
+  // The live symptom: the LLM classifier answered "No explicit request text is
+  // shown", because it had been handed the agent-loop snapshot that the loop
+  // appends after the human message.
+  const llm = fakeLlm({ 'p/hard-target': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'p', hardModel: 'hard-target',
+    normalProvider: 'p', normalModel: 'normal-target',
+  }), { stats })
+  const human = '重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整'
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: human }], source: { kind: 'user' } },
+    { role: 'assistant', content: [{ type: 'tool-call', name: 'read' }], source: { kind: 'model' } },
+    { role: 'user', content: [{ type: 'tool-result', content: [{ type: 'text', text: 'out' }] }], source: { kind: 'tool' } },
+    {
+      role: 'user',
+      content: [{ type: 'text', text: 'AGENT SNAPSHOT: 还有一个未完成的计划，包含若干步骤……'.repeat(40) }],
+      source: { kind: 'plugin', plugin: 'agent-loop', form: 'snapshot', sections: [] },
+    },
+  ]
+  await collect(router.stream({ provider: 'tier-router', model: 'smart', sessionId: 's1', messages }))
+  const snapshot = stats.snapshot()
+  assert.equal(snapshot.hard, 1, 'the snapshot must not downgrade a hard request')
+  assert.equal(snapshot.normal, 0)
+  const decision = snapshot.decisions.at(-1)
+  assert.equal(decision.classifier, 'heuristic')
+  assert.equal(decision.inputChars, human.length, 'classified from the human text, not the snapshot')
+  assert.equal(snapshot.turns.total, 1)
+})
+
+test('lastUserText: a session with only injected context has no human turn', () => {
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'prompt' }], source: { kind: 'plugin', plugin: 'x' } },
+    { role: 'user', content: [{ type: 'text', text: 'AGENT SNAPSHOT …' }], source: { kind: 'plugin', plugin: 'agent-loop', form: 'snapshot' } },
+  ]
+  assert.deepEqual(lastUserText(messages), { text: '', index: -1 })
+  assert.equal(turnKeyFor({ messages, sessionId: 's1' }), undefined)
 })
