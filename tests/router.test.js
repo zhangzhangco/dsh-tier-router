@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   TierRouterAdapter, createDecisionCache, createStats, estimatePromptTokens, lastUserMessage,
-  lastUserMessageIndex, turnKeyFor, fingerprintOf,
+  lastUserMessageIndex, lastUserText, isToolResultMessage, turnKeyFor, fingerprintOf,
   blocksText, failureChunk,
 } from '../lib/router.js'
 import { DEFAULTS } from '../lib/schema.js'
@@ -960,13 +960,13 @@ test('createStats: recordTurn counts a turn once, whatever the key repeats', () 
   assert.equal(stats.recordTurn('s1#0', 'hard', false), false, 'a re-classification inside the turn is still the same turn')
   assert.equal(stats.recordTurn('s1#2', 'hard', false), true, 'a new user message starts a new turn')
   assert.equal(stats.recordTurn('s2#0', 'easy', false), true, 'another session at the same index is another turn')
-  assert.equal(stats.recordTurn(undefined, 'easy', false), true, 'an unidentifiable turn still counts')
-  assert.equal(stats.recordTurn(undefined, 'easy', false), true)
+  assert.equal(stats.recordTurn(undefined, 'easy', false), false, 'a request with no human message is not a human turn')
+  assert.equal(stats.recordTurn(undefined, 'easy', false), false)
   const snapshot = stats.snapshot()
-  assert.equal(snapshot.turns.total, 5)
+  assert.equal(snapshot.turns.total, 3)
   assert.equal(snapshot.turns.normal, 1)
   assert.equal(snapshot.turns.hard, 1)
-  assert.equal(snapshot.turns.easy, 3)
+  assert.equal(snapshot.turns.easy, 1)
   // The per-request counters are a different denominator and stay untouched.
   assert.equal(snapshot.hard + snapshot.normal + snapshot.easy, 0)
 })
@@ -1168,4 +1168,100 @@ test('stream: the decision exposes how little text the classifier actually read'
   assert.equal(decision.level, 'easy', 'a two-character continuation still scores as easy')
   assert.equal(decision.inputChars, 2, 'the decision reports the two characters it judged')
   assert.ok(decision.estimate > 15000, 'while the request itself carries tens of thousands of tokens')
+})
+
+// ---------- tool results are role 'user': never mistake them for the human ----------
+
+/** Messages exactly as dsh-llm declares them (ToolResultMessage.role === 'user'). */
+function loopMessages(humanText, steps) {
+  const messages = [{ role: 'user', content: [{ type: 'text', text: humanText }], source: { kind: 'user' } }]
+  for (let i = 0; i < steps; i += 1) {
+    messages.push({ role: 'assistant', content: [{ type: 'tool-call', name: 'read' }], source: { kind: 'model' } })
+    messages.push({
+      role: 'user',
+      content: [{ type: 'tool-result', content: [{ type: 'text', text: `output ${i}` }] }],
+      source: { kind: 'tool' },
+    })
+  }
+  return messages
+}
+
+test('isToolResultMessage: recognises both the declared source and the block shape', () => {
+  assert.equal(isToolResultMessage({ role: 'user', content: [{ type: 'tool-result', content: [] }], source: { kind: 'tool' } }), true)
+  // Hand-built requests carry no source, so the block shape has to be enough.
+  assert.equal(isToolResultMessage({ role: 'user', content: [{ type: 'tool-result', content: [] }] }), true)
+  assert.equal(isToolResultMessage({ role: 'user', content: [{ type: 'text', text: 'hi' }] }), false)
+  assert.equal(isToolResultMessage({ role: 'user', content: [] }), false, 'empty content is not a tool result')
+  assert.equal(isToolResultMessage(undefined), false)
+})
+
+test('lastUserText: a tool result does not hide the human message that produced it', () => {
+  const messages = loopMessages('帮我重构 router.js 的并发部分', 3)
+  const { text, index } = lastUserText(messages)
+  assert.equal(text, '帮我重构 router.js 的并发部分', 'the human text must survive the tool steps')
+  assert.equal(index, 0, 'and the turn identity must not move')
+  // The bug: the old search returned the tool-result message (role 'user'),
+  // whose text is empty, forcing every step to `normal` unclassified.
+  assert.equal(lastUserMessage(messages).source.kind, 'user')
+})
+
+test('lastUserText: an image-only human message falls back to the nearest earlier text', () => {
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: '看看这张图' }], source: { kind: 'user' } },
+    { role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model' } },
+    { role: 'user', content: [{ type: 'image', attachment: { id: 'sha256:a' } }], source: { kind: 'user' } },
+  ]
+  const { text, index } = lastUserText(messages)
+  assert.equal(index, 2, 'the newest human message still identifies the turn')
+  assert.equal(text, '看看这张图', 'but classification uses the nearest real text')
+})
+
+test('lastUserText: a request with only tool results has no turn', () => {
+  const orphan = [{ role: 'user', content: [{ type: 'tool-result', content: [{ type: 'text', text: 'x' }] }], source: { kind: 'tool' } }]
+  assert.deepEqual(lastUserText(orphan), { text: '', index: -1 })
+  assert.equal(turnKeyFor({ messages: orphan, sessionId: 's1' }), undefined)
+})
+
+test('stream: every tool step is classified from the human message, not from empty text', async () => {
+  // The regression that mattered: with the old lookup the classifier saw an
+  // empty string on every step after the first, so `normal` was not a
+  // judgement at all — it was the default value of `level`.
+  const llm = fakeLlm({ 'p/hard-target': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    hardProvider: 'p', hardModel: 'hard-target',
+    normalProvider: 'p', normalModel: 'normal-target',
+    fallbackProvider: 'p', fallbackModel: 'normal-target',
+  }), { stats })
+  const human = '重构 service 层，涉及 a.ts b.ts c.ts 三处架构调整'
+  for (let step = 0; step < 3; step += 1) {
+    await collect(router.stream({ provider: 'tier-router', model: 'smart', sessionId: 's1', messages: loopMessages(human, step) }))
+  }
+  const snapshot = stats.snapshot()
+  assert.equal(snapshot.hard, 3, 'all three steps must be classified hard, not defaulted to normal')
+  assert.equal(snapshot.normal, 0)
+  assert.equal(snapshot.turns.total, 1, 'and they are one human turn')
+  for (const d of snapshot.decisions) {
+    assert.equal(d.classifier, 'heuristic', 'each step ran a real classification')
+    assert.equal(d.inputChars, human.length, 'reading the human message, not the tool output')
+  }
+})
+
+test('stream: a request with no human message is neither classified nor counted as a turn', async () => {
+  const llm = fakeLlm({ 'p/normal-target': [] })
+  const stats = createStats()
+  const ctx = { get: () => undefined, llm, logger: { info: () => {} } }
+  const router = new TierRouterAdapter(ctx, () => settings({
+    normalProvider: 'p', normalModel: 'normal-target',
+  }), { stats })
+  const auxiliary = [{ role: 'system', content: [{ type: 'text', text: 'summarise this session' }], source: { kind: 'plugin' } }]
+  await collect(router.stream({ provider: 'tier-router', model: 'smart', sessionId: 's1', messages: auxiliary }))
+  const snapshot = stats.snapshot()
+  assert.equal(snapshot.turns.total, 0, 'session-title / compaction calls are not human turns')
+  assert.equal(snapshot.normal, 0, 'and its default `normal` must not enter the difficulty mix')
+  const decision = snapshot.decisions.at(-1)
+  assert.equal(decision.turn, false)
+  assert.equal(decision.classifier, 'none')
+  assert.equal(decision.inputChars, 0)
 })

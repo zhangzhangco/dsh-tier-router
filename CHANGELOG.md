@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.2.3] - 2026-09-17
+
+The classifier was reading the wrong message. On any request after the first in a turn it was handed
+an empty string, so `normal` was not a judgement — it was the default value of `level`. This is what
+made a live instance report 3 hard / 112 normal / 1 easy.
+
+### Fixed
+
+- **A tool result was mistaken for the newest user message.** `ToolResultMessage` is declared
+  `role: 'user'` with content `[ToolResultBlock]`, so the backwards search for the latest user
+  message landed on the tool output of the previous step. `blocksText` of that message is `''`, so
+  every tool-loop step skipped classification entirely and kept the default `normal`; only the first
+  request of each turn was ever classified. `lastUserText` now skips tool results (by declared
+  `source.kind` and, for hand-built requests, by block shape) and reads the newest human message,
+  falling back to the nearest earlier human text when the newest carries none (an image-only turn).
+  Tool steps of one turn now share one classification, which is also what makes the per-request
+  counters mean anything.
+- **Auxiliary model calls were counted as human turns and as `normal` difficulty.** A request with no
+  human message (session title, compaction) has no turn identity, and `recordTurn(undefined, …)`
+  counted every one of them as a fresh turn. Such a request is now neither a turn nor a contribution
+  to the difficulty mix: its `normal` is the default value of `level`, not a judgement. The
+  `decisions` ring still logs it, with `turn: false` and `by none`.
+
+### Added
+
+- `lastUserText` and `isToolResultMessage` are exported for testing.
+
 ## [0.2.2] - 2026-09-17
 
 The routing counters could not answer "is this difficulty mix reasonable?", and nothing on the card
