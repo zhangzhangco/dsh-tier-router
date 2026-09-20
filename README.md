@@ -89,9 +89,9 @@ requests, newest first, each showing the model that answered, the classified tie
 request size, and why that route won:
 
 ```
-21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok (decided from 92 chars)  ·  by heuristic  ·  new turn  ·  hard tier  ·  why: 3 hard signal(s)
-21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok (decided from 2 chars)  ·  by heuristic  ·  same turn  ·  easy tier  ·  why: social signal(s) in short message
-21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok (decided from 41 chars)  ·  by llm-cache  ·  same turn  ·  normal tier  ·  skipped (window too small) gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
+21:47:12  codex-local/gpt-5.6-terra  ·  hard  ·  ~181k tok  ·  by heuristic  ·  new turn  ·  hard tier  ·  why: 3 hard signal(s)
+21:46:40  gpudev/qwen3.8-27b-q5  ·  easy  ·  ~2k tok  ·  by heuristic  ·  same turn  ·  easy tier  ·  why: social signal(s) in short message
+21:45:03  codex-local/gpt-5.5  ·  normal  ·  ~181k tok  ·  by llm-cache  ·  same turn  ·  normal tier  ·  skipped (window too small) gpudev/qwen3.8-27b-q5 (131072 < est 181000, easy tier (fallback))
 ```
 
 Three fields exist specifically to make a surprising tier explainable:
@@ -103,17 +103,15 @@ Three fields exist specifically to make a surprising tier explainable:
 - **`why: …`** — the classifier's own one-sentence reason, or the heuristic's scoring reasons. The
   route reason (`normal tier`) answers *where* the request went; this answers *why* it was judged
   that way.
-- **`decided from N chars`** next to the token estimate — the classifier reads only the latest user
-  message (bounded to 2000 chars), while the request carries the whole history. When those two
-  numbers are far apart, the tier was decided from a small fraction of the request, which is the
-  usual explanation for a level that looks wrong.
+- **`why: …`** — the classifier's own reason: either the sentence the LLM classifier gave, or the
+  heuristic's scoring reasons. It answers "why this tier" where the route reason answers "which tier".
 
 ### Two denominators, on purpose
 
 The counters row counts **requests**; the `Per turn` line below it counts **human turns**.
 
 Inside an agent loop one human message is re-sent on every tool step, and the classification is
-cached per message text, so every step of a turn shares one level. A per-request count is therefore
+cached by bounded state and backend identity, so changed tool evidence can select a new tier. A per-request count is therefore
 weighted by how many steps a task happened to take — it mostly measures loop length, not the mix of
 work. A turn is identified by the last user message (its session plus its index in the request), so a
 five-step tool loop is one turn and a follow-up message is the next one.
@@ -345,3 +343,29 @@ service injection, and drops the bundled free-vision provider seeding.
 ## License
 
 [MIT](./LICENSE).
+
+
+### State-aware classification
+
+The default remains `heuristic`. Select `llm` and configure `llmClassifierProvider/Model` to use the
+generation-based classifier with task and step evidence. Inputs omit private reasoning and plugin
+snapshots; actual downstream messages remain unchanged. `agentStep` counts current-turn tool calls,
+and failures require structured `isError` flags.
+
+The heuristic also covers two cases keywords cannot: a short continuation (`继续`, `continue`, …)
+inherits the previous task's tier, and a repeated structured tool failure for the same call is at
+least `hard`.
+
+SHA-256 cache keys include the complete bounded input, backend/model and prompt. Concurrent identical
+work is shared; caller cancellation is isolated, late results stay keyed to their original state, and
+background work is capped at 30 seconds / 32 pending keys. Only bounded diagnostics are retained in
+memory.
+
+A local option-scoring classifier (`classifier: logits`) was prototyped and then removed: its verdict
+flipped with candidate option order while still reporting near-maximum confidence, which makes the
+score unusable as a gate. The measurements are kept in
+[the decision record](benchmarks/RESULTS.md).
+
+Run `node benchmarks/evaluate-routing.mjs --input /path/to/real_pairs.json` for an offline audit. Add `--endpoint http://127.0.0.1:8765` for actual local inference, and `--permutations` for all six option orders. JSONL rows with `messages` are also accepted; accuracy is reported only for explicit `labelSource: "human"` / `expected` labels. Private samples are not included in this repository. End-to-end task quality, latency and cost require separate controlled task runs.
+
+See [the local validation report](benchmarks/RESULTS.md) for measured latency and option-order sensitivity.

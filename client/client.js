@@ -45,8 +45,15 @@ window.__ModuleLoader__.load({
       'enable.hint': '关闭后请求直接走默认模型（会话当前模型）。',
       classifier: '分类方式',
       'classifier.heuristic': '启发式（零成本，默认）',
-      'classifier.llm': 'LLM 分类（更准，多一次小模型调用）',
-      'classifier.llm.hint': 'LLM 分类默认复用「简单任务」档的模型，也可在下方单独指定。',
+      'classifier.llm': 'LLM 分类（结合任务上下文）',
+      'classifier.hint': '启发式为默认：零成本、结果确定。LLM 分类会结合任务与最近步骤上下文判断，'
+        + '代价是每次分类多一次模型调用。',
+      'section.basic': '基本',
+      'section.vision': '视觉',
+      'section.status': '运行状态',
+      'section.decisions': '最近路由决策',
+      'stats.requests': '按请求',
+      'classifier.selected': '当前：',
       'section.tiers': '各档模型',
       'section.fallback': '默认回退',
       'fallback.hint': '留空 = 使用会话当前默认模型。档位缺失时按 困难→一般→简单→默认 回退。',
@@ -80,7 +87,6 @@ window.__ModuleLoader__.load({
       'vision.mode.hint': '「结构化替换」：图块 → 视觉模型结构化证据 → 替换为文本 → 难度分类；' +
         '「整段路由」：带图请求整体交给视觉模型（旧行为）。',
       inactive: '未激活',
-      stats: '路由统计',
       'stats.hard': '困难',
       'stats.normal': '一般',
       'stats.easy': '简单',
@@ -101,7 +107,6 @@ window.__ModuleLoader__.load({
       'decisions.by': '由',
       'decisions.turn': '新回合',
       'decisions.continuation': '同回合续跑',
-      'decisions.input': '判据文本',
       'benched.title': '已停用路由（判定为当前不可用）',
       'benched.retryIn': '后重试',
       contextGuard: '上下文感知（跳过装不下的模型）',
@@ -130,8 +135,15 @@ window.__ModuleLoader__.load({
       'enable.hint': 'When off, requests go to the session default model unchanged.',
       classifier: 'Classifier',
       'classifier.heuristic': 'Heuristic (zero cost, default)',
-      'classifier.llm': 'LLM classifier (more accurate, costs one small call)',
-      'classifier.llm.hint': 'The LLM classifier reuses the easy-tier model by default; you can pin one below.',
+      'classifier.llm': 'LLM classifier (task and step context)',
+      'classifier.hint': 'Heuristic is the default: zero cost and deterministic. The LLM classifier also '
+        + 'weighs the task and recent steps, at the price of one extra model call per classification.',
+      'section.basic': 'Basics',
+      'section.vision': 'Vision',
+      'section.status': 'Status',
+      'section.decisions': 'Recent routing decisions',
+      'stats.requests': 'per request',
+      'classifier.selected': 'Active:',
       'section.tiers': 'Tier models',
       'section.fallback': 'Default fallback',
       'fallback.hint': 'Empty = the session default model. Missing tiers fall back hard → normal → easy → default.',
@@ -166,7 +178,6 @@ window.__ModuleLoader__.load({
       'vision.mode.hint': '"Structured replace": image → structured evidence from the vision model → ' +
         'replaced by text → difficulty classification. "Route": image requests go to the vision tier whole (legacy).',
       inactive: 'inactive',
-      stats: 'Route stats',
       'stats.hard': 'Hard',
       'stats.normal': 'Normal',
       'stats.easy': 'Easy',
@@ -187,7 +198,6 @@ window.__ModuleLoader__.load({
       'decisions.by': 'by',
       'decisions.turn': 'new turn',
       'decisions.continuation': 'same turn',
-      'decisions.input': 'decided from',
       'benched.title': 'Benched routes (judged unavailable)',
       'benched.retryIn': 'retry in',
       contextGuard: 'Context-aware routing (skip models that cannot hold the request)',
@@ -268,6 +278,16 @@ window.__ModuleLoader__.load({
       title: { fontSize: 13, fontWeight: 700, margin: '14px 0 2px' },
       stat: { fontSize: 12, opacity: 0.75, marginRight: 10 },
       switchRow: { display: 'flex', alignItems: 'center', gap: 8 },
+      // One cell per counter: eight counters read as a status row instead of a
+      // run-on line of labels and numbers.
+      statGrid: { display: 'flex', flexWrap: 'wrap', gap: 20, margin: '2px 0 8px' },
+      statValue: { fontSize: 18, fontWeight: 700, lineHeight: 1.2 },
+      statLabel: { fontSize: 11, opacity: 0.6, marginTop: 2 },
+      // A decision is a headline plus a muted explanation, so the list scans by
+      // model and tier while the reasoning stays available underneath.
+      decision: { padding: '7px 0', borderTop: '1px solid rgba(128,128,128,.16)' },
+      decisionHead: { fontSize: 12.5, fontWeight: 600 },
+      decisionWhy: { fontSize: 11.5, opacity: 0.6, marginTop: 3, lineHeight: 1.45 },
     }
 
     // ---------- helpers ----------
@@ -288,6 +308,14 @@ window.__ModuleLoader__.load({
       const at = new Date(iso)
       return Number.isNaN(at.getTime()) ? '--:--:--' : at.toLocaleTimeString()
     }
+    /**
+     * One status counter: the number over its label. A row of these reads as a
+     * dashboard, where the same eight values inline read as a log line.
+     */
+    const statCell = (label, value) => h('div', { style: { minWidth: 46 } },
+      h('div', { style: S.statValue }, String(value ?? 0)),
+      h('div', { style: S.statLabel }, label),
+    )
     /**
      * Clear the model field when the new provider no longer lists the current
      * model (or the provider was cleared), so the UI never shows a provider
@@ -465,8 +493,6 @@ window.__ModuleLoader__.load({
         cause: String(d?.cause ?? ''),
         classifier: String(d?.classifier ?? ''),
         turn: d?.turn === true,
-        fingerprint: String(d?.fingerprint ?? ''),
-        inputChars: Number.isFinite(d?.inputChars) ? d.inputChars : 0,
         // Routing overhead: everything spent before the chosen model was
         // called. The number to look at when routing "feels slow".
         overheadMs: Number.isFinite(d?.timings?.overheadMs) ? d.timings.overheadMs : 0,
@@ -612,6 +638,9 @@ window.__ModuleLoader__.load({
 
       return h(Fragment, {},
         h('div', { style: S.hint }, t('intro')),
+
+        // ---- basics: the three switches that shape routing ------------------
+        h('div', { style: S.title }, t('section.basic')),
         h('div', { style: S.card },
           h('div', { style: S.switchRow },
             h('input', {
@@ -623,20 +652,6 @@ window.__ModuleLoader__.load({
             h('label', { style: { fontSize: 13, fontWeight: 600 } }, t('enable')),
           ),
           h('div', { style: S.hint }, t('enable.hint')),
-        ),
-        h('div', { style: S.card },
-          h('div', { style: S.switchRow },
-            h('input', {
-              type: 'checkbox',
-              checked: value.contextGuard !== false,
-              disabled: !writable,
-              onChange: (e) => void write('contextGuard', e.target.checked),
-            }),
-            h('label', { style: { fontSize: 13, fontWeight: 600 } }, t('contextGuard')),
-          ),
-          h('div', { style: S.hint }, t('contextGuard.hint')),
-        ),
-        h('div', { style: S.card },
           h('div', { style: S.row },
             h('div', { style: { ...S.label, minWidth: 72 } }, t('classifier')),
             h('select', {
@@ -649,8 +664,20 @@ window.__ModuleLoader__.load({
               h(Option, { value: 'llm', label: t('classifier.llm') }),
             ),
           ),
-          h('div', { style: S.hint }, t('classifier.llm.hint')),
+          h('div', { style: S.hint }, t('classifier.hint')),
+          h('div', { style: S.switchRow },
+            h('input', {
+              type: 'checkbox',
+              checked: value.contextGuard !== false,
+              disabled: !writable,
+              onChange: (e) => void write('contextGuard', e.target.checked),
+            }),
+            h('label', { style: { fontSize: 13, fontWeight: 600 } }, t('contextGuard')),
+          ),
+          h('div', { style: S.hint }, t('contextGuard.hint')),
         ),
+
+        // ---- the tier ladder ------------------------------------------------
         h('div', { style: S.title }, t('section.tiers')),
         h('div', { style: S.card },
           h('div', { style: S.hint }, t('sameVendor')),
@@ -667,6 +694,9 @@ window.__ModuleLoader__.load({
             disabled: !writable,
           })),
         ),
+
+        // ---- vision ---------------------------------------------------------
+        h('div', { style: S.title }, t('section.vision')),
         h('div', { style: S.card },
           h('div', { style: S.row },
             h('div', { style: { ...S.label, minWidth: 72 } }, t('tier.vision')),
@@ -710,6 +740,8 @@ window.__ModuleLoader__.load({
           h('div', { style: S.hint }, t('vision.mode.hint')),
           h('div', { style: S.hint }, t('vision.rowHint')),
         ),
+
+        // ---- fallback -------------------------------------------------------
         h('div', { style: S.title }, t('section.fallback')),
         h('div', { style: S.card },
           h('div', { style: S.row },
@@ -728,6 +760,8 @@ window.__ModuleLoader__.load({
             h('span', {}, ` — ${t('fallback.hint')}`),
           ),
         ),
+
+        // ---- LLM classifier route (only relevant when it is selected) -------
         String(value.classifier) === 'llm'
           ? h(Fragment, {},
               h('div', { style: S.title }, t('section.llm')),
@@ -744,85 +778,90 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 } },
+
+        // ---- actions --------------------------------------------------------
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 14 } },
           h('button', { style: S.button, disabled: !writable || saving, onClick: resetAll }, t('reset.all')),
           saving ? h('span', { style: S.stat }, t('saving')) : null,
           saveFailed ? h('span', { style: { ...S.stat, color: 'rgba(220,80,80,1)' } }, t('saveError')) : null,
           !writable ? h('span', { style: { ...S.stat, color: 'rgba(220,180,60,1)' } }, t('readOnly')) : null,
-          stats !== null
-            ? h(Fragment, {},
-                h('span', { style: S.stat }, `${t('stats')}:`),
-                h('span', { style: S.stat }, `${t('stats.hard')} ${stats.hard ?? 0}`),
-                h('span', { style: S.stat }, `${t('stats.normal')} ${stats.normal ?? 0}`),
-                h('span', { style: S.stat }, `${t('stats.easy')} ${stats.easy ?? 0}`),
-                h('span', { style: S.stat }, `${t('stats.vision')} ${stats.vision ?? 0}`),
-                h('span', { style: S.stat }, `${t('stats.visionBridge')} ${stats.visionBridge ?? 0}`),
-                h('span', { style: S.stat }, `${t('stats.fallback')} ${stats.fallback ?? 0}`),
-                h('span', { style: S.stat }, `${t('stats.error')} ${stats.error ?? 0}`),
-                // Failures the fallback chain recovered: the ring below lists
-                // them, so counting them only under "unrecovered" made the
-                // card read "0 errors" next to a visible error list.
-                h('span', { style: S.stat }, `${t('stats.routeError')} ${stats.routeError ?? 0}`),
-              )
-            : null,
           catalogError ? h('span', { style: { ...S.stat, color: 'rgba(220,80,80,1)' } }, t('loadError')) : null,
         ),
-        // A route that already told us it cannot serve is benched, so the next
-        // request skips it instead of paying its failure again. Saying so here
-        // is the difference between "the router is broken" and "that model is
-        // out of quota and the fallback is answering".
-        Array.isArray(stats?.benched) && stats.benched.length > 0
-          ? h('div', { style: { ...S.stat, marginTop: 4, color: 'rgba(220,180,60,1)' } },
-              `${t('benched.title')}: `,
-              stats.benched.map((b) => `${b.provider}/${b.model} — ${b.code || 'failed'}${b.message !== '' ? ` (${b.message})` : ''}, ${b.secondsLeft}s ${t('benched.retryIn')}`).join('  ·  '),
-            )
-          : null,
-        // The per-request counters above are dominated by the agent tool loop:
-        // one human turn re-sends the same classified message on every step, so
-        // they mostly measure how many steps a task took. This line is the
-        // denominator that answers "is the difficulty mix reasonable?".
-        stats !== null && stats.turns
-          ? h('div', { style: { ...S.stat, marginTop: 4 } },
-              `${t('stats.turns')}: `,
-              `${t('stats.hard')} ${stats.turns.hard ?? 0}  `,
-              `${t('stats.normal')} ${stats.turns.normal ?? 0}  `,
-              `${t('stats.easy')} ${stats.turns.easy ?? 0}  `,
-              `${t('stats.vision')} ${stats.turns.vision ?? 0}  `,
-              `${t('stats.turnsTotal')} ${stats.turns.total ?? 0}`,
-            )
-          : null,
-        // Which model actually handled each recent request. The host keeps a
-        // bounded ring (newest last); show newest first, capped for width.
-        h('div', { style: { marginTop: 12 } },
-          h('div', { style: S.hint }, t('decisions')),
+
+        // ---- status ---------------------------------------------------------
+        h('div', { style: S.title }, t('section.status')),
+        h('div', { style: S.card },
+          stats === null
+            ? h('div', { style: S.hint }, t('loading'))
+            : h(Fragment, {},
+                h('div', { style: S.statGrid },
+                  statCell(t('stats.hard'), stats.hard ?? 0),
+                  statCell(t('stats.normal'), stats.normal ?? 0),
+                  statCell(t('stats.easy'), stats.easy ?? 0),
+                  statCell(t('stats.vision'), stats.vision ?? 0),
+                  statCell(t('stats.fallback'), stats.fallback ?? 0),
+                  statCell(t('stats.routeError'), stats.routeError ?? 0),
+                  statCell(t('stats.error'), stats.error ?? 0),
+                ),
+                // The counters above are per request, and one human turn re-sends
+                // the same classified message on every tool step — so they mostly
+                // measure how many steps a task took. The per-turn line is the
+                // denominator that answers "is the difficulty mix reasonable?".
+                stats.turns
+                  ? h('div', { style: S.hint },
+                      `${t('stats.turns')} · `,
+                      `${t('stats.hard')} ${stats.turns.hard ?? 0}   `,
+                      `${t('stats.normal')} ${stats.turns.normal ?? 0}   `,
+                      `${t('stats.easy')} ${stats.turns.easy ?? 0}   `,
+                      `${t('stats.vision')} ${stats.turns.vision ?? 0}   `,
+                      `${t('stats.turnsTotal')} ${stats.turns.total ?? 0}`,
+                    )
+                  : null,
+              ),
+          // A route that already told us it cannot serve is benched, so the next
+          // request skips it instead of paying its failure again. Saying so is the
+          // difference between "the router is broken" and "that model is out of
+          // quota and the fallback is answering".
+          Array.isArray(stats?.benched) && stats.benched.length > 0
+            ? h('div', { style: { ...S.hint, color: 'rgba(220,180,60,1)', opacity: 1 } },
+                `${t('benched.title')}: `,
+                stats.benched.map((b) => `${b.provider}/${b.model} — ${b.code || 'failed'}${b.message !== '' ? ` (${b.message})` : ''}, ${b.secondsLeft}s ${t('benched.retryIn')}`).join('  ·  '),
+              )
+            : null,
+        ),
+
+        // ---- recent decisions ----------------------------------------------
+        h('div', { style: S.title }, t('section.decisions')),
+        h('div', { style: S.card },
           decisions.length === 0
-            ? h('div', { style: S.stat }, t('decisions.empty'))
-            : decisions.slice().reverse().slice(0, 8).map((d, index) => h('div', {
-                key: `${d.at}-${index}`,
-                style: S.stat,
-              },
-                `${clockOf(d.at)}  `,
-                d.outcome === 'failed'
-                  ? `✗ ${t('decisions.failed')}`
-                  : `${d.provider}/${d.model}${d.effort !== '' ? ` @${d.effort}` : ''}`,
-                d.level !== '' ? `  ·  ${d.level}` : '',
-                d.estimate > 0 ? `  ·  ~${Math.round(d.estimate / 1000)}k tok` : '',
-                // The mismatch that explains most surprising levels: how much
-                // text the classifier actually read vs how big the request is.
-                d.inputChars > 0 ? ` (${t('decisions.input')} ${d.inputChars} chars)` : '',
-                d.classifier !== '' ? `  ·  ${t('decisions.by')} ${d.classifier}` : '',
-                // Same turn = another tool step of the message above it, not a
-                // new human request. Makes the agent loop visible at a glance.
-                stats?.turns ? `  ·  ${t(d.turn ? 'decisions.turn' : 'decisions.continuation')}` : '',
-                d.overheadMs > 0
-                  ? `  ·  ${t('decisions.overhead')} ${(d.overheadMs / 1000).toFixed(2)}s` +
-                    (d.classifyMs >= 50 ? ` (${t('decisions.classify')} ${(d.classifyMs / 1000).toFixed(1)}s)` : '')
-                  : '',
-                d.tried.length > 0 ? `  ·  ${t('decisions.tried')} ${d.tried.join(' → ')}` : '',
-                d.skipped.length > 0 ? `  ·  ${t('decisions.skipped')} ${d.skipped.join('; ')}` : '',
-                d.reason !== '' ? `  ·  ${d.reason}` : '',
-                d.cause !== '' ? `  ·  ${t('decisions.cause')}: ${d.cause}` : '',
-              )),
+            ? h('div', { style: S.hint }, t('decisions.empty'))
+            : decisions.slice().reverse().slice(0, 8).map((d, index) => {
+                const head = [
+                  clockOf(d.at),
+                  d.outcome === 'failed'
+                    ? `✗ ${t('decisions.failed')}`
+                    : `${d.provider}/${d.model}${d.effort !== '' ? ` @${d.effort}` : ''}`,
+                  d.level !== '' ? d.level : '',
+                  d.estimate > 0 ? `~${Math.round(d.estimate / 1000)}k tok` : '',
+                  // Same turn = another tool step of the message above, not a new
+                  // human request. Makes the agent loop visible at a glance.
+                  stats?.turns ? t(d.turn ? 'decisions.turn' : 'decisions.continuation') : '',
+                ].filter((part) => part !== '').join('  ·  ')
+                const why = [
+                  d.classifier !== '' ? `${t('decisions.by')} ${d.classifier}` : '',
+                  d.cause !== '' ? `${t('decisions.cause')}: ${d.cause}` : '',
+                  d.overheadMs > 0
+                    ? `${t('decisions.overhead')} ${(d.overheadMs / 1000).toFixed(2)}s`
+                      + (d.classifyMs >= 50 ? ` (${t('decisions.classify')} ${(d.classifyMs / 1000).toFixed(1)}s)` : '')
+                    : '',
+                  d.tried.length > 0 ? `${t('decisions.tried')} ${d.tried.join(' → ')}` : '',
+                  d.skipped.length > 0 ? `${t('decisions.skipped')} ${d.skipped.join('; ')}` : '',
+                ].filter((part) => part !== '').join('  ·  ')
+                return h('div', { key: `${d.at}-${index}`, style: S.decision },
+                  h('div', { style: S.decisionHead }, head),
+                  why !== '' ? h('div', { style: S.decisionWhy }, why) : null,
+                )
+              }),
         ),
       )
     }

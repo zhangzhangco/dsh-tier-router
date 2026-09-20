@@ -61,6 +61,7 @@ export function apply(ctx, config) {
 
   return () => {
     registration()
+    router.classifications?.dispose()
   }
 }
 

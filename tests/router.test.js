@@ -943,7 +943,13 @@ test('decision records carry where the routing time went', async () => {
   const decision = stats.snapshot().decisions.at(-1)
   assert.ok(Number.isFinite(decision.timings.overheadMs), 'overheadMs must be recorded')
   assert.ok(decision.timings.overheadMs >= 0)
-  assert.equal(decision.timings.classifyMs, 0, 'heuristic classification costs nothing')
+  // The heuristic path is local work only. Asserting an exact 0 here was really
+  // asserting the clock's resolution: classification now serializes the bounded
+  // evidence envelope, which costs a fraction of a millisecond and rounds to 1.
+  // What matters is that the tier came from the heuristic, not a model call.
+  assert.equal(decision.classifier, 'heuristic', 'the heuristic decided, so no classifier was called')
+  assert.ok(decision.timings.classifyMs < 50,
+    `heuristic classification must stay local (measured ${decision.timings.classifyMs}ms)`)
   assert.ok(Number.isFinite(decision.timings.guardMs))
 })
 
@@ -1508,4 +1514,77 @@ test('lastUserText: a session with only injected context has no human turn', () 
   ]
   assert.deepEqual(lastUserText(messages), { text: '', index: -1 })
   assert.equal(turnKeyFor({ messages, sessionId: 's1' }), undefined)
+})
+
+test('state-aware LLM reclassifies after tools; model changes cannot reuse old cache', async () => {
+  const calls = []
+  let classifierModel = 'classifier-a'
+  const ctx = { llm: { prepareCall: async config => ({ config, async *stream(options) {
+    calls.push(options)
+    yield { type: 'text-delta', text: '{"level":"hard","reason":"step evidence"}' }
+  } }) } }
+  const router = new TierRouterAdapter(ctx, () => settings({ classifier: 'llm',
+    llmClassifierProvider: 'p', llmClassifierModel: classifierModel, hardProvider: 'p', hardModel: 'hard' }))
+  const options = optionsFor('修')
+  await router.resolveChain(options)
+  await router.resolveChain(options)
+  assert.equal(calls.length, 1)
+  options.messages.push({ role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'test', arguments: '{}' }] },
+    { role: 'user', source: { kind: 'tool' }, content: [{ type: 'tool-result', toolCallId: 'c1', isError: true,
+      content: [{ type: 'text', text: 'cache race failure' }] }] })
+  await router.resolveChain(options)
+  assert.equal(calls.length, 2)
+  assert.match(calls[1].messages[1].content[0].text, /cache race failure/)
+  classifierModel = 'classifier-b'
+  await router.resolveChain(options)
+  assert.equal(calls.length, 3)
+})
+
+
+test('classifier cannot recursively select the virtual router', async () => {
+  const router = new TierRouterAdapter(fakeCtx(), () => settings({ classifier: 'llm',
+    llmClassifierProvider: 'tier-router', llmClassifierModel: 'smart' }))
+  assert.equal((await router.classifyWithLlm('hi')).source, 'unavailable')
+})
+
+test('partial output failure is recorded as failed and never retried', async () => {
+  const llm = fakeLlm({ 'p/first': [
+    { type: 'text-delta', text: 'partial' },
+    { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'lost' } } },
+  ] })
+  const stats = createStats()
+  const router = new TierRouterAdapter({ llm }, () => settings({ normalProvider: 'p', normalModel: 'first',
+    fallbackProvider: 'p', fallbackModel: 'second' }), { stats })
+  await collect(router.stream(optionsFor('a request')))
+  assert.equal(llm.calls.length, 1)
+  assert.equal(stats.snapshot().decisions.at(-1).outcome, 'failed')
+  assert.equal(stats.snapshot().error, 1)
+})
+
+test('cancelled classification never dispatches the main model', async () => {
+  const controller = new AbortController()
+  let calls = 0
+  const ctx = { llm: { prepareCall: async config => {
+    calls++
+    return { config, async *stream() { controller.abort(); yield { type: 'text-delta', text: '{"level":"hard"}' } } }
+  } } }
+  const router = new TierRouterAdapter(ctx, () => settings({ classifier: 'llm',
+    llmClassifierProvider: 'p', llmClassifierModel: 'judge', hardProvider: 'p', hardModel: 'main' }))
+  const chunks = await collect(router.stream({ ...optionsFor('修'), signal: controller.signal }))
+  assert.equal(calls, 1)
+  assert.equal(chunks.at(-1).reason.kind, 'aborted')
+})
+
+
+test('disabled router also records a partially failed default stream accurately', async () => {
+  const llm = fakeLlm({ 'p/default': [
+    { type: 'text-delta', text: 'partial' },
+    { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'lost' } } },
+  ] })
+  const stats = createStats()
+  const router = new TierRouterAdapter({ llm,
+    get: () => ({ currentSelection: () => ({ provider: 'p', model: 'default' }) }),
+  }, () => settings({ enabled: false }), { stats })
+  await collect(router.stream(optionsFor('hello')))
+  assert.equal(stats.snapshot().decisions.at(-1).outcome, 'failed')
 })

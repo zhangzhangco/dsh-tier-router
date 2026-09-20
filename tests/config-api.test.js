@@ -427,3 +427,28 @@ test('stats GET reports a recovered route failure without calling the request an
   assert.equal(payload.errors.length, 1)
   assert.equal(payload.fallback, 1)
 })
+
+test('classifier settings API validates input and rejects retired fields', async () => {
+  const settings = fakeSettings()
+  const captured = {}
+  const ctx = { get: () => settings, llm: {}, webServer: { register: ({ handler }) => { captured.handler = handler; return () => {} } } }
+  installModelsApi(ctx, () => undefined)
+  const post = (field, value) =>
+    invoke(captured.handler, fakeReq('POST', '/tier-router/api/config', { field, value }), fakeRes())
+
+  // `classifier` is a closed union: an unknown or retired value must not be stored.
+  for (const value of ['unknown', 'logits']) {
+    assert.equal((await post('classifier', value)).status, 400, value)
+  }
+  for (const value of ['heuristic', 'llm']) {
+    assert.equal((await post('classifier', value)).status, 200, value)
+  }
+  for (const value of [-1, 40000, 1.5]) {
+    assert.equal((await post('classifierTimeoutMs', value)).status, 400, String(value))
+  }
+  // The local-logits scorer was removed; a stale UI or hand-edited config that
+  // still tries to write its fields must fail loudly instead of half-applying.
+  for (const field of ['logitsShadow', 'logitsEndpoint', 'logitsTimeoutMs', 'logitsMinMargin', 'logitsMinScore']) {
+    assert.equal((await post(field, 1)).status, 400, field)
+  }
+})

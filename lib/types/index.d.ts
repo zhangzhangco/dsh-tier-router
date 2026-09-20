@@ -65,6 +65,10 @@ export interface TierRouterSettings {
    * guard never empties a chain (a routable request stays routable).
    */
   contextGuard: boolean
+  classifierTimeoutMs: number
+  visionTimeoutMs: number
+  routeCooldownMs: number
+  routeFailureThreshold: number
 }
 
 /** Settings namespace owned by this plugin. */

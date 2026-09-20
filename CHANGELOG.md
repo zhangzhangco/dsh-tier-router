@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.4.0] - 2026-09-20
+
+Bounded evidence for classification, two heuristics for cases keywords cannot see, and the removal
+of the local option-scoring classifier.
+
+### Added
+
+- **Classification reads a bounded evidence envelope instead of one message.** `lib/routing-state.js`
+  builds a ≤6000-character JSON state — current task, recent conversation, current-turn tool calls
+  and results, structured failure counts, estimated tokens, image flag — and omits private reasoning
+  and plugin snapshots. Downstream messages are unchanged. `lib/routing-cache.js` adds SHA-256 cache
+  keys over the full input plus backend identity, in-flight request sharing, and per-waiter
+  cancellation isolation.
+- **Two heuristic rules for what keywords cannot see.** A short continuation (`继续`, `continue`, …)
+  inherits the previous task's tier; a repeated structured tool failure for the same call is at least
+  `hard`. Both work when no semantic classifier is reachable.
+- `agentStep` and `toolErrorCount` are recorded per decision, and the settings card shows the
+  per-turn denominator next to the per-request counters.
+
+### Removed
+
+- **The local logits option scorer** (`classifier: logits`), its `logits*` settings, the
+  `logitsShadow` comparison checkbox and the `experiments` stats block. Its verdict flipped with
+  candidate option order while still reporting near-maximum confidence, so the score could not be
+  used as a gate; see [benchmarks/RESULTS.md](./benchmarks/RESULTS.md). Configurations that still
+  set a retired field are rejected by the config API rather than silently accepted.
+
+### Changed
+
+- `classifier` is now a closed union (`heuristic` | `llm`); an unknown value is rejected.
+- The settings card is grouped into titled sections (Basics / Tier models / Vision / Fallback /
+  Status / Recent decisions) instead of a single run of cards. Status counters render as a grid, and
+  each decision is a headline plus a muted explanation rather than a dozen concatenated fields.
+
 ## [0.3.1] - 2026-09-17
 
 Injected context is a user-role message too, and it was the one being classified.
