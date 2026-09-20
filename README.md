@@ -190,6 +190,7 @@ tier-router:
 | --- | --- | --- |
 | `enabled` | `true` | Master switch; when off, requests go to the session default model. |
 | `classifier` | `heuristic` | `heuristic` (built-in scoring) or `llm` (a model decides the tier). |
+| `hardScore` | `3` | Heuristic only: score at or above which a request is `hard`. See the note below before changing it. |
 | `hardProvider` / `hardModel` / `hardEffort` | `codex-local` / `gpt-6-astra` / `''` | Hardest tier. |
 | `normalProvider` / `normalModel` / `normalEffort` | `codex-local` / `gpt-5.5` / `''` | Everyday tier. |
 | `easyProvider` / `easyModel` / `easyEffort` | `gpudev` / `qwen3.8-27b-q5` / `''` | Cheapest tier. |
@@ -202,6 +203,27 @@ tier-router:
 | `classifierTimeoutMs` | `4000` | Budget for the LLM classifier. On timeout the heuristic decides immediately and the slow answer is cached for later requests. |
 | `visionTimeoutMs` | `60000` | Budget for one vision-sidecar call, so a hung vision provider cannot stall the turn. |
 | `contextGuard` | `true` | Skip routes whose known context window cannot hold the request. |
+
+### The `hardScore` knob, and why it is not a fix
+
+Measured on 213 real requests from one machine, the heuristic score distribution was degenerate:
+
+| Score | Requests |
+| ---: | ---: |
+| 6 | 1 |
+| 2 | 1 |
+| 1 | 10 |
+| **0** | **169 (79%)** |
+| -1 | 32 |
+
+Nothing landed between 2 and 6, so `hardScore` values 2, 3, 4 and 5 behave identically. Only two
+settings do anything: `3` (the default — 1 request in 213 became `hard`) and `1` (12 did). `0` is
+safe for small talk because greetings score -1, and the schema clamps the value to 0..10 — a
+negative cut-off would classify every greeting as `hard`.
+
+The knob is useful for choosing how aggressive to be, **not** for accuracy: 79% of requests sit in
+one bucket, so no threshold separates hard work from routine work. If routing quality is the goal,
+use `classifier: llm` instead.
 
 ## How routing works
 
@@ -363,9 +385,8 @@ memory.
 
 A local option-scoring classifier (`classifier: logits`) was prototyped and then removed: its verdict
 flipped with candidate option order while still reporting near-maximum confidence, which makes the
-score unusable as a gate. The measurements are kept in
-[the decision record](benchmarks/RESULTS.md).
+score unusable as a gate. See [the decision record](benchmarks/RESULTS.md) for the measurements and
+for what was **not** verified.
 
-Run `node benchmarks/evaluate-routing.mjs --input /path/to/real_pairs.json` for an offline audit. Add `--endpoint http://127.0.0.1:8765` for actual local inference, and `--permutations` for all six option orders. JSONL rows with `messages` are also accepted; accuracy is reported only for explicit `labelSource: "human"` / `expected` labels. Private samples are not included in this repository. End-to-end task quality, latency and cost require separate controlled task runs.
-
-See [the local validation report](benchmarks/RESULTS.md) for measured latency and option-order sensitivity.
+End-to-end task quality, latency and cost still need separate controlled runs; nothing in this
+repository establishes an accuracy claim for either classifier.

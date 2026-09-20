@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   CLASSIFIER_SYSTEM_PROMPT,
+  DEFAULT_HARD_SCORE,
   classifyDifficulty,
   classifierInput,
   classifierRoute,
@@ -121,4 +122,35 @@ test('classifyDifficulty: inflected english keywords still count', () => {
   assert.equal(classifyDifficulty('running the tests now').level, 'normal')
   assert.equal(classifyDifficulty('testing the new parser').level, 'normal')
   assert.notEqual(classifyDifficulty('refactoring this module').level, 'easy')
+})
+
+test('classifyDifficulty: hardScore is the hard cut-off, defaulting to 3', () => {
+  // A real request that scores 1: "migrate the whole project" carries one hard
+  // keyword. It is the case the default threshold cannot reach, and the reason
+  // the setting exists.
+  const text = '把整个项目从 CommonJS 迁移到 ESM'
+  const baseline = classifyDifficulty(text)
+  assert.equal(baseline.score, 1)
+  assert.equal(baseline.level, 'normal', 'the built-in threshold of 3 leaves this at normal')
+  assert.equal(DEFAULT_HARD_SCORE, 3)
+
+  assert.equal(classifyDifficulty(text, { hardScore: 1 }).level, 'hard')
+  assert.equal(classifyDifficulty(text, { hardScore: 2 }).level, 'normal')
+
+  // The score test is the FIRST branch, so a threshold at 0 still leaves small
+  // talk easy — greetings score -1, which is below the cut-off.
+  for (const text of ['你好', 'thanks!', 'ok']) {
+    assert.equal(classifyDifficulty(text, { hardScore: 0 }).level, 'easy', text)
+  }
+  // Which is exactly why a negative cut-off is not allowed: -1 >= -5 would turn
+  // every greeting hard. The settings schema clamps hardScore to 0..10.
+  assert.equal(classifyDifficulty('hi', { hardScore: -5 }).level, 'hard')
+})
+
+test('classifyDifficulty: a missing or unusable hardScore keeps the built-in', () => {
+  const text = '这个并发下的死锁帮我查一下根因' // scores 3
+  for (const bad of [undefined, null, 'abc', NaN, {}]) {
+    assert.equal(classifyDifficulty(text, { hardScore: bad }).level, 'hard', String(bad))
+  }
+  assert.equal(classifyDifficulty('把整个项目从 CommonJS 迁移到 ESM', {}).level, 'normal')
 })

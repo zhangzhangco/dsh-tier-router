@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.5.0] - 2026-09-20
+
+The heuristic's hard threshold becomes a setting — together with the measurement showing why the
+knob is not the fix.
+
+### Added
+
+- **`hardScore`** (default `3`) — `classifyDifficulty` now takes its hard cut-off as an argument,
+  exposed as a setting and as a number input in the settings card (disabled under `classifier: llm`,
+  where the score plays no part). The schema clamps it to 0..10: the score test is the first branch,
+  so a negative cut-off would classify every greeting as hard.
+- Both READMEs document the measurement behind it, because a tunable threshold invites the
+  assumption that tuning it improves routing. It does not — on 213 real requests 79% scored exactly
+  0 and nothing landed between 2 and 6, so 2/3/4/5 behave identically and only 3 (1 hard in 213) and
+  1 (12) differ. The score does not separate hard work from routine work.
+
+### Fixed
+
+- **The README instructed readers to run a script that no longer exists.** The
+  `node benchmarks/evaluate-routing.mjs` line survived the logits removal in 0.4.0 and shipped
+  inside the 0.4.0 tarball.
+
 ## [0.4.0] - 2026-09-20
 
 Bounded evidence for classification, two heuristics for cases keywords cannot see, and the removal

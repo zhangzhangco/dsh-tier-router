@@ -36,6 +36,8 @@ export interface TierRouterSettings {
   enabled: boolean
   /** `heuristic` (built-in scoring) or `llm` (a model decides the tier). */
   classifier: 'heuristic' | 'llm'
+  /** Heuristic only: score at which a request is classified `hard` (default 3). */
+  hardScore: number
   hardProvider: string
   hardModel: string
   hardEffort: string

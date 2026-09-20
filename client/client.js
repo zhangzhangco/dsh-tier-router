@@ -48,6 +48,10 @@ window.__ModuleLoader__.load({
       'classifier.llm': 'LLM 分类（结合任务上下文）',
       'classifier.hint': '启发式为默认：零成本、结果确定。LLM 分类会结合任务与最近步骤上下文判断，'
         + '代价是每次分类多一次模型调用。',
+      hardScore: '困难阈值',
+      'hardScore.hint': '启发式得分达到此值即判「困难」。实测本机 213 条真实请求中 79% 恰好得 0 分，'
+        + '2/3/4/5 效果因此相同：默认 3 几乎不判困难，改成 1 会把有正向信号的请求（约 12 条）判为困难。'
+        + '仅对启发式生效。得分本身无法区分困难与一般，调到能用的档位不等于判得准。',
       'section.basic': '基本',
       'section.vision': '视觉',
       'section.status': '运行状态',
@@ -138,6 +142,12 @@ window.__ModuleLoader__.load({
       'classifier.llm': 'LLM classifier (task and step context)',
       'classifier.hint': 'Heuristic is the default: zero cost and deterministic. The LLM classifier also '
         + 'weighs the task and recent steps, at the price of one extra model call per classification.',
+      hardScore: 'Hard threshold',
+      'hardScore.hint': 'A heuristic score at or above this is classified hard. Measured on 213 real '
+        + 'requests from this machine, 79% scored exactly 0, so 2/3/4/5 behave identically: 3 (default) '
+        + 'almost never says hard, while 1 promotes the ~12 requests carrying any positive signal. '
+        + 'Applies to the heuristic only. The score does not separate hard from normal, so picking a '
+        + 'usable setting is not the same as classifying well.',
       'section.basic': 'Basics',
       'section.vision': 'Vision',
       'section.status': 'Status',
@@ -665,6 +675,25 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('div', { style: S.hint }, t('classifier.hint')),
+          // The heuristic's only tuning knob. Disabled under `llm`, where the
+          // model decides and the score plays no part.
+          h('div', { style: S.row },
+            h('div', { style: { ...S.label, minWidth: 72 } }, t('hardScore')),
+            h('input', {
+              key: `hardScore-${value.hardScore}`,
+              style: { ...S.select, maxWidth: 84 },
+              type: 'number', min: 0, max: 10, step: 1,
+              defaultValue: value.hardScore ?? 3,
+              disabled: !writable || String(value.classifier) === 'llm',
+              onBlur: (e) => {
+                const next = Number(e.target.value)
+                if (Number.isInteger(next) && next >= 0 && next <= 10 && next !== value.hardScore) {
+                  void write('hardScore', next)
+                }
+              },
+            }),
+          ),
+          h('div', { style: S.hint }, t('hardScore.hint')),
           h('div', { style: S.switchRow },
             h('input', {
               type: 'checkbox',

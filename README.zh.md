@@ -167,6 +167,7 @@ tier-router:
 | --- | --- | --- |
 | `enabled` | `true` | 总开关；关闭后请求走会话默认模型。 |
 | `classifier` | `heuristic` | `heuristic`（内置打分）或 `llm`（由模型判定档位）。 |
+| `hardScore` | `3` | 仅启发式：得分达到此值即判「困难」。改之前先看下一节。 |
 | `hardProvider` / `hardModel` / `hardEffort` | `codex-local` / `gpt-6-astra` / `''` | 困难档。 |
 | `normalProvider` / `normalModel` / `normalEffort` | `codex-local` / `gpt-5.5` / `''` | 一般档。 |
 | `easyProvider` / `easyModel` / `easyEffort` | `gpudev` / `qwen3.8-27b-q5` / `''` | 简单档。 |
@@ -179,6 +180,25 @@ tier-router:
 | `classifierTimeoutMs` | `4000` | LLM 分类器预算。超时则立刻改用启发式，慢分类的结果仍会写入缓存供后续请求使用。 |
 | `visionTimeoutMs` | `60000` | 单次视觉旁路调用预算，避免视觉模型卡住整个回合。 |
 | `contextGuard` | `true` | 跳过上下文窗口装不下本次请求的路由。 |
+
+### `hardScore` 这个旋钮，以及它为什么不是解法
+
+在一台机器的 213 条真实请求上实测，启发式的得分分布是退化的：
+
+| 得分 | 条数 |
+| ---: | ---: |
+| 6 | 1 |
+| 2 | 1 |
+| 1 | 10 |
+| **0** | **169（79%）** |
+| -1 | 32 |
+
+2 到 6 分之间没有任何样本，所以 `hardScore` 取 2、3、4、5 效果完全相同。真正有区别的只有两个值：
+`3`（默认，213 条里判出 1 条困难）和 `1`（判出 12 条）。`0` 对闲聊是安全的（问候语得 -1 分），
+而 schema 把取值钳在 0..10 —— 负阈值会把每句问候都判成「困难」。
+
+这个旋钮的用途是**选择激进度，不是提升准确度**：79% 的请求落在同一个桶里，任何阈值都无法把
+困难工作和日常改动分开。如果目标是路由质量，请改用 `classifier: llm`。
 
 ## 路由规则
 
