@@ -32,9 +32,12 @@ while [ $# -gt 0 ]; do
 done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PROFILE_DIR="${HOME}/.dsh/profiles/${PROFILE}"
-LOG="${HOME}/.dsh/web-${PROFILE}.log"
-PIDFILE="${HOME}/.dsh/web-${PROFILE}.pid"
+# dsh 的 $DSH_HOME 就是它放 profiles/ sessions/ storages/ 的地方，默认 ~/.dsh。
+# 不能用 ${HOME}/.dsh 硬编码 —— 设了 DSH_HOME 的机器上会找错目录。
+DSH_HOME="${DSH_HOME:-${HOME}/.dsh}"
+PROFILE_DIR="${DSH_HOME}/profiles/${PROFILE}"
+LOG="${DSH_HOME}/web-${PROFILE}.log"
+PIDFILE="${DSH_HOME}/web-${PROFILE}.pid"
 API="http://127.0.0.1:${PORT}/tier-router/api/config"
 
 DSH_BIN="${DSH_BIN:-$(command -v dsh 2>/dev/null || true)}"
@@ -127,7 +130,7 @@ echo "== 3/5 清理孤儿锁 =="
 # 卡在 "timed out waiting for the writer lock"。这里只在锁内记录的 PID 确实
 # 已不存在时才删 —— 持有者仍存活就保留，不动别人正在用的锁。
 FOUND=0
-for L in "${HOME}/.dsh"/*.lock "${HOME}/.dsh"/*/*.lock; do
+for L in "${DSH_HOME}"/*.lock "${DSH_HOME}"/*/*.lock; do
   [ -e "${L}" ] || continue
   FOUND=1
   HOLDER="$(tr -dc '0-9' <"${L}" 2>/dev/null || true)"
@@ -145,16 +148,33 @@ echo "== 4/5 启动（cwd=${HOME}，日志 ${LOG}）=="
 if [ -f "${PIDFILE}" ]; then
   OLD_PID="$(cat "${PIDFILE}" 2>/dev/null || true)"
   if [ -n "${OLD_PID}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
-    echo "   旧 pidfile 记录的进程 ${OLD_PID} 仍存活，先停掉"
-    kill "${OLD_PID}" 2>/dev/null || true
-    sleep 2
+    # 不能拿到 PID 就杀：PID 会被复用，陈旧 pidfile 可能指向无关进程。
+    # 先确认它确实是 dsh；ps 不可用（某些沙箱会拒）时选择跳过而不是盲杀 ——
+    # 真正占着端口的实例在第 2 步已经处理过了。
+    OLD_CMD="$(ps -o command= -p "${OLD_PID}" 2>/dev/null || true)"
+    case "${OLD_CMD}" in
+      *dsh*)
+        echo "   旧 pidfile 记录的进程 ${OLD_PID} 是 dsh，先停掉"
+        kill "${OLD_PID}" 2>/dev/null || true
+        sleep 2
+        ;;
+      "")
+        echo "   pidfile 里有 ${OLD_PID}，但无法确认它是不是 dsh（ps 不可用），跳过不杀"
+        ;;
+      *)
+        echo "   pidfile 里的 ${OLD_PID} 不是 dsh（${OLD_CMD}），跳过不杀"
+        ;;
+    esac
   fi
 fi
 cd "${HOME}"
 # 用 nohup + 重定向脱离当前 shell，否则这个脚本退出会把服务带走。
-nohup "${DSH_BIN}" --profile "${PROFILE}" --no-open >"${LOG}" 2>&1 &
+# --port 必须显式传：上面的"停旧进程"和下面的健康检查都按 ${PORT} 来，不传的话
+# 新进程会去绑 profile 的默认端口，于是 PORT=8080 时会杀掉 8080 却在 3080 起服务，
+# 健康检查必然失败。
+nohup "${DSH_BIN}" --profile "${PROFILE}" --no-open --port "${PORT}" >"${LOG}" 2>&1 &
 echo $! >"${PIDFILE}"
-echo "   pid $(cat "${PIDFILE}")"
+echo "   pid $(cat "${PIDFILE}")  port ${PORT}"
 
 echo "== 5/5 健康检查 =="
 READY=0
