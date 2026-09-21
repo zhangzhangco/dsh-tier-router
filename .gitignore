@@ -1,6 +1,10 @@
 # dependencies
 node_modules/
 
+# 本仓库不跟踪 lockfile：依赖只有一个运行时包 + 三个 peer，peer 由 dsh 运行时提供，
+# 锁不住也不需要锁。npm install 会生成 package-lock.json，让它留在工作区外。
+package-lock.json
+
 # npm pack / publish artifacts
 *.tgz
 npm-debug.log*
