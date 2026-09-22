@@ -1,9 +1,7 @@
 # Changelog
 
-## [Unreleased]
-
-Jev (TypeSafe System One) joins the heuristic and the LLM classifier as a third, opt-in way to decide
-the tier.
+## [0.6.0] - 2026-09-22
+Jev joins the heuristic and the LLM as a third classifier, and the ladder falls back to the nearest tier.
 
 ### Added
 
