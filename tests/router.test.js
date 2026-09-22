@@ -144,6 +144,48 @@ test('resolveChain: hard classification picks the hard tier, normal tier second 
   assert.equal(resolved.chain[1].model, 'deepseek-chat')
 })
 
+test('resolveChain: an easy classification falls back to normal before hard', async () => {
+  // The regression this guards: a one-line question whose local model is cold,
+  // busy or too small used to escalate straight to the hard tier — on a live
+  // instance, a Codex route with no quota left, which then burned minutes
+  // before answering. The nearest tier must be tried first instead.
+  const router = adapter({
+    easyProvider: 'gpudev',
+    easyModel: 'qwen3.8-27b-q5',
+    normalProvider: 'deepseek-official',
+    normalModel: 'deepseek-flash',
+    hardProvider: 'codex-local',
+    hardModel: 'gpt-6-astra',
+  })
+  const resolved = await router.resolveChain(optionsFor('你好'))
+  assert.equal(resolved.level, 'easy')
+  assert.deepEqual(resolved.chain.map((c) => `${c.provider}/${c.model}`), [
+    'gpudev/qwen3.8-27b-q5',
+    'deepseek-official/deepseek-flash',
+    'codex-local/gpt-6-astra',
+  ])
+  assert.deepEqual(
+    resolved.chain.map((c) => c.reason),
+    ['easy tier', 'normal tier (fallback)', 'hard tier (fallback)'],
+  )
+})
+
+test('resolveChain: a normal classification still escalates to hard before dropping to easy', async () => {
+  const router = adapter({
+    easyProvider: 'gpudev',
+    easyModel: 'qwen3.8-27b-q5',
+    normalProvider: 'deepseek-official',
+    normalModel: 'deepseek-flash',
+    hardProvider: 'codex-local',
+    hardModel: 'gpt-6-astra',
+  })
+  const resolved = await router.resolveChain(optionsFor('修复这个 bug'))
+  assert.equal(resolved.level, 'normal')
+  assert.deepEqual(resolved.chain.map((c) => c.model), [
+    'deepseek-flash', 'gpt-6-astra', 'qwen3.8-27b-q5',
+  ])
+})
+
 test('resolveChain: an unconfigured requested tier falls through to the configured tier, then the default', async () => {
   const router = adapter(
     { easyProvider: 'deepseek-official', easyModel: 'deepseek-chat' },

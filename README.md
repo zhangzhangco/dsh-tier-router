@@ -29,11 +29,14 @@ makes that choice per request instead:
 ## Features
 
 - **Three-tier difficulty routing** — heuristic classifier (default: zero cost, zero latency,
-  deterministic) or an optional LLM classifier with caching.
+  deterministic), an optional LLM classifier, or **Jev** (TypeSafe System One), which answers the tier
+  as a typed three-option choice instead of generating text. All three are cached.
 - **Vision sidecar** — when a request carries images, a vision model converts them into structured
   evidence (summary / OCR / layout) that replaces the image block as text; the difficulty tiers then
   answer. A legacy `route` mode sends the whole turn to the vision tier instead.
-- **Ladder fallback** — requested tier → remaining tiers (hardest first) → your default model.
+- **Ladder fallback** — requested tier → the nearest remaining tiers → your default model. `easy`
+  falls to `normal` before `hard`, so a small local model that cannot answer never hands a one-line
+  question to the most expensive route; `normal` and `hard` keep escalating first.
 - **Fail-open** — an error finish chunk is only emitted when every route failed; requests are never
   silently swallowed.
 - **No forks, no patches** — pure adapter-level routing (`ctx.llm.registerAdapter` + `prepareCall`);
@@ -96,10 +99,11 @@ request size, and why that route won:
 
 Three fields exist specifically to make a surprising tier explainable:
 
-- **`by <classifier>`** — which classifier produced the level: `llm`, `llm-cache`, `heuristic`,
-  `llm-timeout`, `llm-error` or `llm-unavailable`. A tier that came from the heuristic because the
-  LLM classifier timed out or was never configured says so instead of being indistinguishable from a
-  real classification.
+- **`by <classifier>`** — which classifier produced the level: `heuristic`; `llm`, `llm-cache`,
+  `llm-timeout`, `llm-error`, `llm-unavailable`; or `jev`, `jev-cache`, `jev-low-confidence`,
+  `jev-timeout`, `jev-auth`, `jev-rate-limit`, `jev-error`, `jev-unavailable`. A tier that came from
+  the heuristic because a semantic classifier timed out, lost its API key or abstained says so
+  instead of being indistinguishable from a real classification.
 - **`why: …`** — the classifier's own one-sentence reason, or the heuristic's scoring reasons. The
   route reason (`normal tier`) answers *where* the request went; this answers *why* it was judged
   that way.
@@ -164,7 +168,7 @@ them directly:
 ```yaml
 tier-router:
   enabled: true
-  classifier: heuristic          # heuristic | llm
+  classifier: heuristic          # heuristic | llm | jev
   hardProvider: codex-local
   hardModel: gpt-6-astra
   hardEffort: ''                 # e.g. low / high / max; empty = unspecified
@@ -184,12 +188,18 @@ tier-router:
   fallbackModel: ''
   llmClassifierProvider: ''      # classifier: llm; empty = reuse the easy tier
   llmClassifierModel: ''
+  # classifier: jev (TypeSafe System One). The key is normally pasted into the
+  # settings card; TYPESAFE_API_KEY and ~/.typesafe/key are fallbacks.
+  jevApiKey: ''                  # never echoed back to the settings card
+  jevModel: jev-latest
+  jevBaseUrl: https://api.typesafe.ai
+  jevMinConfidence: 0.3          # below this Jev abstains and the heuristic decides (0 = off)
 ```
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Master switch; when off, requests go to the session default model. |
-| `classifier` | `heuristic` | `heuristic` (built-in scoring) or `llm` (a model decides the tier). |
+| `classifier` | `heuristic` | `heuristic` (built-in scoring), `llm` (a model generates a verdict) or `jev` (TypeSafe System One answers a typed choice). |
 | `hardScore` | `3` | Heuristic only: score at or above which a request is `hard`. See the note below before changing it. |
 | `hardProvider` / `hardModel` / `hardEffort` | `codex-local` / `gpt-6-astra` / `''` | Hardest tier. |
 | `normalProvider` / `normalModel` / `normalEffort` | `codex-local` / `gpt-5.5` / `''` | Everyday tier. |
@@ -200,7 +210,11 @@ tier-router:
 | `visionFallbacks` | `[]` | Explicit vision fallbacks before the default model. |
 | `fallbackProvider` / `fallbackModel` | `''` | Route used when no tier is configured; empty = session default. |
 | `llmClassifierProvider` / `llmClassifierModel` | `''` | Classifier model for `classifier: llm`. |
-| `classifierTimeoutMs` | `4000` | Budget for the LLM classifier. On timeout the heuristic decides immediately and the slow answer is cached for later requests. |
+| `jevApiKey` | `''` | TypeSafe key for `classifier: jev`. Falls back to `TYPESAFE_API_KEY`, then `~/.typesafe/key`. |
+| `jevModel` | `jev-latest` | Model alias for the Jev judgement. |
+| `jevBaseUrl` | `https://api.typesafe.ai` | TypeSafe API base URL (`/v1/systemone` is appended). |
+| `jevMinConfidence` | `0.3` | Below this confidence the Jev answer counts as an abstention and the heuristic decides. `0` disables the floor. |
+| `classifierTimeoutMs` | `4000` | Budget for the semantic classifier (LLM or Jev). On timeout the heuristic decides immediately and the slow answer is cached for later requests. |
 | `visionTimeoutMs` | `60000` | Budget for one vision-sidecar call, so a hung vision provider cannot stall the turn. |
 | `contextGuard` | `true` | Skip routes whose known context window cannot hold the request. |
 
@@ -223,7 +237,7 @@ negative cut-off would classify every greeting as `hard`.
 
 The knob is useful for choosing how aggressive to be, **not** for accuracy: 79% of requests sit in
 one bucket, so no threshold separates hard work from routine work. If routing quality is the goal,
-use `classifier: llm` instead.
+use a semantic classifier (`classifier: llm` or `classifier: jev`) instead.
 
 ## How routing works
 
@@ -233,8 +247,8 @@ request ──► has images?
              │         visionMode=route:   whole turn → vision tier                        │
              └─ no ───────────────────────────────────────────────────────────────────────┤
                                                                                             ▼
-                                              difficulty classification (heuristic/LLM) ─► tier chain
-                                              chosen tier → other tiers (hardest first) → default model
+                                     difficulty classification (heuristic / LLM / Jev) ─► tier chain
+                                              chosen tier → other tiers (nearest first) → default model
 ```
 
 **Difficulty signals** are bilingual (English + Chinese): code-fence volume, number of file
@@ -322,7 +336,7 @@ Worth knowing before you rely on it:
   session that once had a screenshot keeps paying for vision evidence until that turn leaves the
   conversation.
 - **The heuristic is conservative.** A hard verdict needs a score of 3 or more; two hard keywords
-  alone land at `normal`. Retarget the tiers, or switch `classifier` to `llm`.
+  alone land at `normal`. Retarget the tiers, or switch `classifier` to `llm` or `jev`.
 - **This router only acts when you select it.** It routes requests made *through* the `smart` model,
   so it is opt-in per session.
 - **Do not run it together with a plugin that force-overrides the model** on the `agent/request`
@@ -337,7 +351,7 @@ Worth knowing before you rely on it:
 git clone https://github.com/zhangzhangco/dsh-tier-router
 cd dsh-tier-router
 npm install --legacy-peer-deps   # pulls the public @deepseek-ai/* peers
-npm test                         # 85 cases, node:test, no test framework
+npm test                         # 202 cases, node:test, no test framework
 ```
 
 `npm test` runs Node's built-in runner (`node --test`, auto-discovery). Note that
@@ -351,7 +365,7 @@ dsh plugin --profile web remove dsh-tier-router
 dsh plugin --profile web add link:/absolute/path/to/dsh-tier-router
 ```
 
-Layout: `index.js` (bundle entry), `lib/{schema,router,classifier,vision,models-api}.js`,
+Layout: `index.js` (bundle entry), `lib/{schema,router,classifier,jev,vision,models-api}.js`,
 `lib/types/index.d.ts` (hand-written TypeScript declarations), `client/client.js` (the settings card,
 a build-free `window.__ModuleLoader__` bundle), `cordis.patch.yml` (the bundle layer), `tests/`.
 
@@ -370,13 +384,15 @@ service injection, and drops the bundled free-vision provider seeding.
 ### State-aware classification
 
 The default remains `heuristic`. Select `llm` and configure `llmClassifierProvider/Model` to use the
-generation-based classifier with task and step evidence. Inputs omit private reasoning and plugin
+generation-based classifier with task and step evidence, or select `jev` to let TypeSafe System One
+answer the same question as a typed `choice` (see below). Inputs omit private reasoning and plugin
 snapshots; actual downstream messages remain unchanged. `agentStep` counts current-turn tool calls,
 and failures require structured `isError` flags.
 
-The heuristic also covers two cases keywords cannot: a short continuation (`继续`, `continue`, …)
-inherits the previous task's tier, and a repeated structured tool failure for the same call is at
-least `hard`.
+Two deterministic cases are not left to any classifier, including Jev: a short continuation (`继续`,
+`continue`, …) inherits the previous task's tier, and a repeated structured tool failure for the same
+call is at least `hard` — applied as a floor above the verdict, because the whole point of escalating
+is that the model in play already failed.
 
 SHA-256 cache keys include the complete bounded input, backend/model and prompt. Concurrent identical
 work is shared; caller cancellation is isolated, late results stay keyed to their original state, and
@@ -389,4 +405,41 @@ score unusable as a gate. See [the decision record](benchmarks/RESULTS.md) for t
 for what was **not** verified.
 
 End-to-end task quality, latency and cost still need separate controlled runs; nothing in this
-repository establishes an accuracy claim for either classifier.
+repository establishes an accuracy claim for any of the three classifiers.
+
+### Jev (TypeSafe System One)
+
+`classifier: jev` asks TypeSafe's hosted judgement model one `choice` question — *which tier handles
+the next step?* — and gets back the chosen tier, a probability per option and a confidence. Nothing
+is generated, so there is no reply format to misparse; the router's policy stays in code.
+
+Setup, in order of precedence:
+
+1. paste the key into *Settings → Tier Router → Jev* (`jevApiKey`), or
+2. export `TYPESAFE_API_KEY`, or
+3. rely on `~/.typesafe/key` if you already have the TypeSafe SDK installed.
+
+The key is stored in this machine's settings and is **never echoed back** to the settings card: the
+config API reports only whether a usable key exists and where it came from. Because the card cannot
+read the stored key, the input is always blank — leave it blank to keep the current key, or paste a
+new one to replace it.
+
+What was measured on the development machine (Apple M4, macOS, to `api.typesafe.ai`): **0.73–0.82s**
+per round trip end to end (`connect` ~0.2s) for a three-option question over a small state object,
+against the `classifierTimeoutMs` budget of 4000ms. That is the cost you pay once per changed turn —
+the decision is cached by bounded evidence plus question wording and model, so the tool steps of one
+loop do not each pay it.
+
+Failure handling is deliberately boring: a missing key, a rejected key (401/403), a rate limit
+(429/529), a timeout, a transport error or an unusable answer all resolve to a named
+`jev-*` classifier in the decision record and hand the decision back to the heuristic. A refused key
+is additionally not retried for 60 seconds, so a wrong key does not cost a round trip on every turn.
+
+`jevMinConfidence` is the abstention floor. A uniform distribution over three options has a
+confidence near 0, so the default `0.3` rejects exactly the judgements that carry no real signal
+rather than letting a coin flip pick a tier. Set it to `0` to trust every answer, or raise it if you
+would rather have the heuristic decide more often.
+
+The rubric itself — the instructions and the per-option `what` / `not_for` / `examples` — lives in
+`lib/jev.js`. Its wording is part of the cache identity, so editing it can never serve a decision
+made under the old phrasing.

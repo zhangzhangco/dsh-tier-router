@@ -13,6 +13,9 @@
 #     hardModel: gpt-6-astra
 #     easyProvider: gpudev
 #     easyModel: qwen3.8-27b-q5
+#     classifier: jev            # heuristic | llm | jev
+#     jevApiKey: apikey-...      # normally pasted into the settings card;
+#                                # TYPESAFE_API_KEY and ~/.typesafe/key are fallbacks
 - insert:
     - id: tier-router
       name: dsh-tier-router

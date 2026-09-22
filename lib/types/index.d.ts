@@ -34,8 +34,8 @@ export interface VisionFallback {
 export interface TierRouterSettings {
   /** Master switch; when false the session default model handles the request. */
   enabled: boolean
-  /** `heuristic` (built-in scoring) or `llm` (a model decides the tier). */
-  classifier: 'heuristic' | 'llm'
+  /** `heuristic` (built-in scoring), `llm` (a model generates a verdict) or `jev` (TypeSafe System One answers a typed choice). */
+  classifier: 'heuristic' | 'llm' | 'jev'
   /** Heuristic only: score at which a request is classified `hard` (default 3). */
   hardScore: number
   hardProvider: string
@@ -62,6 +62,21 @@ export interface TierRouterSettings {
   llmClassifierProvider: string
   llmClassifierModel: string
   /**
+   * TypeSafe key for `classifier: 'jev'`. Empty means "fall back": the
+   * environment's `TYPESAFE_API_KEY`, then `~/.typesafe/key`. This field is
+   * never echoed back by the settings API — it reports `jevKeySet` instead.
+   */
+  jevApiKey: string
+  /** Model alias for the Jev judgement (default `jev-latest`). */
+  jevModel: string
+  /** TypeSafe API base URL; `/v1/systemone` is appended. */
+  jevBaseUrl: string
+  /**
+   * Below this confidence the Jev answer counts as an abstention and the
+   * heuristic decides. `0` disables the floor.
+   */
+  jevMinConfidence: number
+  /**
    * Skip a route whose *known* context window cannot hold the estimated
    * request length. Models with an unknown window are never skipped, and the
    * guard never empties a chain (a routable request stays routable).
@@ -85,6 +100,12 @@ export declare const DEFAULTS: Readonly<TierRouterSettings>
 export declare const SETTINGS_SCHEMA: unknown
 /** Tier names in routing-priority order (hard first). */
 export declare const TIER_ORDER: readonly TierName[]
+/**
+ * The other tiers, in fallback order: nearest capability first, and the harder
+ * tier first at equal distance. `easy` yields `['normal', 'hard']`; `normal`
+ * and `hard` keep the escalation-first order.
+ */
+export declare function tierFallbackOrder(level: string): TierName[]
 
 /** Read one tier route triple out of a resolved settings object. */
 export declare function tierRoute(settings: TierRouterSettings, tier: RouteName): RouteTriple

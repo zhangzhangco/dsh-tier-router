@@ -440,15 +440,85 @@ test('classifier settings API validates input and rejects retired fields', async
   for (const value of ['unknown', 'logits']) {
     assert.equal((await post('classifier', value)).status, 400, value)
   }
-  for (const value of ['heuristic', 'llm']) {
+  for (const value of ['heuristic', 'llm', 'jev']) {
     assert.equal((await post('classifier', value)).status, 200, value)
   }
   for (const value of [-1, 40000, 1.5]) {
     assert.equal((await post('classifierTimeoutMs', value)).status, 400, String(value))
+  }
+  // The Jev confidence floor is a probability.
+  for (const value of [-0.1, 1.5, 'high']) {
+    assert.equal((await post('jevMinConfidence', value)).status, 400, String(value))
+  }
+  for (const value of [0, 0.3, 1]) {
+    assert.equal((await post('jevMinConfidence', value)).status, 200, String(value))
   }
   // The local-logits scorer was removed; a stale UI or hand-edited config that
   // still tries to write its fields must fail loudly instead of half-applying.
   for (const field of ['logitsShadow', 'logitsEndpoint', 'logitsTimeoutMs', 'logitsMinMargin', 'logitsMinScore']) {
     assert.equal((await post(field, 1)).status, 400, field)
   }
+})
+
+// ---------- Jev / TypeSafe credential handling ----------
+
+/**
+ * Key resolution that can never reach this machine's real environment or
+ * `~/.typesafe/key` — otherwise the "not configured" cases would pass or fail
+ * depending on what the developer happens to have installed.
+ */
+const ISOLATED_KEY_DEPS = { env: {}, readKeyFile: () => '' }
+
+/** The config API plus a settings service pre-loaded with a Jev key. */
+function jevCtx() {
+  const settings = fakeSettings({ jevApiKey: 'apikey-SUPERSECRET' })
+  const captured = {}
+  const ctx = { get: () => settings, llm: {}, webServer: { register: ({ handler }) => { captured.handler = handler; return () => {} } } }
+  installModelsApi(ctx, () => undefined, ISOLATED_KEY_DEPS)
+  return { captured, settings }
+}
+
+test('config GET never echoes the Jev API key, only whether one is set', async () => {
+  const { captured } = jevCtx()
+  const res = await invoke(captured.handler, fakeReq('GET', '/tier-router/api/config'), fakeRes())
+  assert.equal(res.status, 200)
+  assert.equal('jevApiKey' in res.json.config, false, 'the secret must not be in the response at all')
+  assert.equal(res.json.config.jevKeySet, true)
+  assert.equal(res.json.config.jevKeySource, 'settings')
+  assert.equal(res.status === 200 && JSON.stringify(res.json).includes('SUPERSECRET'), false)
+})
+
+test('config GET reports no key when none is configured', async () => {
+  const settings = fakeSettings()
+  const captured = {}
+  const ctx = { get: () => settings, llm: {}, webServer: { register: ({ handler }) => { captured.handler = handler; return () => {} } } }
+  installModelsApi(ctx, () => undefined, ISOLATED_KEY_DEPS)
+  const res = await invoke(captured.handler, fakeReq('GET', '/tier-router/api/config'), fakeRes())
+  assert.equal(res.json.config.jevKeySet, false)
+  assert.equal(res.json.config.jevKeySource, '')
+})
+
+test('config POST stores a pasted key and the response stays masked', async () => {
+  const { captured, settings } = jevCtx()
+  const res = await invoke(
+    captured.handler,
+    fakeReq('POST', '/tier-router/api/config', { field: 'jevApiKey', value: 'apikey-NEW' }),
+    fakeRes(),
+  )
+  assert.equal(res.status, 200)
+  assert.deepEqual(settings.writes[0], { kind: 'update', patch: { jevApiKey: 'apikey-NEW' } })
+  assert.equal('jevApiKey' in res.json.config, false)
+  assert.equal(res.json.config.jevKeySet, true)
+})
+
+test('config POST with null clears the stored key', async () => {
+  const { captured, settings } = jevCtx()
+  const res = await invoke(
+    captured.handler,
+    fakeReq('POST', '/tier-router/api/config', { field: 'jevApiKey', value: null }),
+    fakeRes(),
+  )
+  assert.equal(res.status, 200)
+  assert.deepEqual(settings.writes[0], { kind: 'mutate', ops: [{ op: 'unset', path: ['jevApiKey'] }] })
+  assert.equal(res.json.config.jevKeySet, false)
 })

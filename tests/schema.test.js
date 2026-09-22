@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DEFAULTS, MODEL, NAMESPACE, PROVIDER, SETTINGS_SCHEMA, TIER_ORDER,
-  fallbackRoute, normalizeRoute, routeConfigured, tierRoute,
+  fallbackRoute, normalizeRoute, routeConfigured, tierFallbackOrder, tierRoute,
 } from '../lib/schema.js'
 
 test('namespace and provider ids are stable', () => {
@@ -10,6 +10,30 @@ test('namespace and provider ids are stable', () => {
   assert.equal(PROVIDER, 'tier-router')
   assert.equal(MODEL, 'smart')
   assert.deepEqual(TIER_ORDER, ['hard', 'normal', 'easy'])
+})
+
+test('tierFallbackOrder: nearest tier first, harder tier wins a tie', () => {
+  // The easy case is the point of the rule: a local model that cannot answer a
+  // one-line question must fall to `normal`, not escalate to `hard`.
+  assert.deepEqual(tierFallbackOrder('easy'), ['normal', 'hard'])
+  // Normal and hard keep the escalation-first order: under-serving a hard
+  // request is the worse mistake.
+  assert.deepEqual(tierFallbackOrder('normal'), ['hard', 'easy'])
+  assert.deepEqual(tierFallbackOrder('hard'), ['normal', 'easy'])
+})
+
+test('tierFallbackOrder: an unknown level lists every tier by priority', () => {
+  assert.deepEqual(tierFallbackOrder('vision'), ['hard', 'normal', 'easy'])
+  assert.deepEqual(tierFallbackOrder(''), ['hard', 'normal', 'easy'])
+})
+
+test('tierFallbackOrder: never returns the requested tier, never mutates TIER_ORDER', () => {
+  for (const level of TIER_ORDER) {
+    const order = tierFallbackOrder(level)
+    assert.equal(order.includes(level), false, `${level} must not be its own fallback`)
+    assert.equal(order.length, TIER_ORDER.length - 1)
+  }
+  assert.deepEqual(TIER_ORDER, ['hard', 'normal', 'easy'], 'TIER_ORDER stays hard-first')
 })
 
 test('defaults: enabled, heuristic classifier, four configured tiers', () => {
@@ -113,4 +137,22 @@ test('routeConfigured / normalizeRoute', () => {
     model: '',
     effort: '',
   })
+})
+
+test('defaults: the Jev classifier is available but nothing is enabled implicitly', () => {
+  // Opt-in on purpose: an API key and a network round trip per turn must be a
+  // deliberate choice, so the shipped default stays the free heuristic.
+  assert.equal(DEFAULTS.classifier, 'heuristic')
+  assert.equal(DEFAULTS.jevApiKey, '')
+  assert.equal(DEFAULTS.jevModel, 'jev-latest')
+  assert.equal(DEFAULTS.jevBaseUrl, 'https://api.typesafe.ai')
+  assert.equal(DEFAULTS.jevMinConfidence, 0.3)
+  // Jev shares the classifier budget; no separate knob to keep in sync.
+  assert.equal(DEFAULTS.classifierTimeoutMs, 4000)
+})
+
+test('schema: the classifier union accepts jev and rejects an unknown backend', () => {
+  assert.equal(SETTINGS_SCHEMA({ classifier: 'jev' }).classifier, 'jev')
+  assert.equal(SETTINGS_SCHEMA({}).classifier, 'heuristic')
+  assert.throws(() => SETTINGS_SCHEMA({ classifier: 'logits' }), /classified|classifier/)
 })

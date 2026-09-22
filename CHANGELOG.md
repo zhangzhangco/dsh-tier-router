@@ -1,5 +1,55 @@
 # Changelog
 
+## [Unreleased]
+
+Jev (TypeSafe System One) joins the heuristic and the LLM classifier as a third, opt-in way to decide
+the tier.
+
+### Added
+
+- **`classifier: jev`** — the difficulty decision becomes a typed TypeSafe `choice` question over
+  `hard | normal | easy` instead of generated text plus a parser. Jev returns the tier with a
+  probability per option and a confidence, so the answer is a value, not prose: the "reply format
+  drifted" failure mode simply does not exist on this path. The rubric (instructions plus per-option
+  `what` / `not_for` / `examples`) lives in `lib/jev.js`, and its wording is part of the cache
+  identity — editing it can never reuse a decision made under the old phrasing.
+- **`jevApiKey` / `jevModel` / `jevBaseUrl` / `jevMinConfidence`** settings, plus a Jev section in the
+  settings card. The key resolves settings → `TYPESAFE_API_KEY` → `~/.typesafe/key`, so an
+  already-installed TypeSafe SDK needs nothing pasted; the config API reports only *whether* a usable
+  key exists and where it came from, and never echoes the secret back to the page (the card's input is
+  therefore always blank: empty means "keep", paste means "replace").
+- **`jevMinConfidence`** (default `0.3`) — below this confidence the judgement is treated as an
+  abstention and the heuristic decides. A uniform distribution over three options has a confidence
+  near 0, so the floor rejects the guesses that carry no signal instead of letting a coin flip pick a
+  tier. `0` disables it.
+- Tests: `tests/jev.test.js` (30 cases) covers the request body, response validation, key
+  precedence, every transport failure class (401/403, 429/529, 5xx, non-JSON, network, timeout,
+  abort), the router wiring, the confidence gate, the 60s backoff after a refused key, and that the
+  key never reaches anything the settings card renders.
+
+### Changed
+
+- **The ladder falls back to the nearest tier, not the hardest one.** A request the classifier judged
+  `easy` used to fall to `hard` second, and on a live instance `hard` was a Codex route with no quota
+  left: a local model that was merely cold, busy or too small sent a one-line question into a
+  minutes-long retry ladder before the cheap workhorse in `normal` was tried at all. `easy` now
+  continues to `normal` and only then to `hard`; `normal` and `hard` keep their escalation-first order
+  (`normal → hard → easy`, `hard → normal → easy`), because under-serving a genuinely hard request is
+  the worse mistake. The rule is the exported `tierFallbackOrder()`, so the order is a testable value
+  instead of a loop inside `resolveChain`.
+- **A repeated structured tool failure is now a floor above *every* classifier's verdict**, not only
+  above the heuristic's. `state.repeatedFailure` is a fact about the loop — the same call failed the
+  same way twice — and the point of escalating is that the model in play already failed, so a
+  judgement must not be able to talk the router out of it. Previously the LLM classifier's answer
+  could override it.
+- `classifierTimeoutMs` is now documented as the budget for either semantic classifier (LLM or Jev);
+  no second knob was added. Measured on the development machine, a Jev round trip to
+  `api.typesafe.ai` is 0.73–0.82s end to end against the 4000ms default.
+- `maskConfig` is now the only way the settings API serializes the section, and
+  `installModelsApi` takes an optional key-resolution seam so a test can pin the credential source
+  rather than inheriting whatever the machine has in `~/.typesafe/key`.
+
+
 ## [0.5.0] - 2026-09-20
 
 The heuristic's hard threshold becomes a setting — together with the measurement showing why the

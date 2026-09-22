@@ -46,8 +46,28 @@ window.__ModuleLoader__.load({
       classifier: '分类方式',
       'classifier.heuristic': '启发式（零成本，默认）',
       'classifier.llm': 'LLM 分类（结合任务上下文）',
+      'classifier.jev': 'Jev 判断（TypeSafe System One）',
       'classifier.hint': '启发式为默认：零成本、结果确定。LLM 分类会结合任务与最近步骤上下文判断，'
-        + '代价是每次分类多一次模型调用。',
+        + '代价是每次分类多一次模型调用。Jev 不走文本生成：它把「这一档该交给谁」当成一道三选一的选择题，'
+        + '直接返回档位、各档概率和置信度，因此不存在「回复格式解析失败」这条失效路径；'
+        + '代价是一次约 1 秒的 HTTPS 往返（需要 TypeSafe API Key）。三种方式失败时都会回退到启发式，不会阻断请求。',
+      'section.jev': 'Jev 判断（TypeSafe）',
+      'jev.key': 'API Key',
+      'jev.key.placeholder': '粘贴 TypeSafe API Key',
+      'jev.key.set': '已配置',
+      'jev.key.unset': '未配置',
+      'jev.key.source.settings': '来源：本页设置',
+      'jev.key.source.env': '来源：环境变量 TYPESAFE_API_KEY',
+      'jev.key.source.file': '来源：~/.typesafe/key',
+      'jev.key.save': '保存',
+      'jev.key.clear': '清除',
+      'jev.key.hint': 'Key 只留在本机设置里，接口不回传它（只回「是否已配置」），所以输入框永远是空的：'
+        + '留空即不修改，要换 Key 就直接粘贴新的并保存。',
+      'jev.model': '模型',
+      'jev.model.hint': '默认 jev-latest，一般不用改。',
+      'jev.minConfidence': '置信度下限',
+      'jev.minConfidence.hint': '低于这个置信度就当作「弃权」，改由启发式判断（0 = 不设门槛）。'
+        + '三个选项的均匀分布置信度约为 0，所以 0.3 挡掉的正是「没有真实信号、纯靠猜」的那些判断。',
       hardScore: '困难阈值',
       'hardScore.hint': '启发式得分达到此值即判「困难」。实测本机 213 条真实请求中 79% 恰好得 0 分，'
         + '2/3/4/5 效果因此相同：默认 3 几乎不判困难，改成 1 会把有正向信号的请求（约 12 条）判为困难。'
@@ -140,8 +160,32 @@ window.__ModuleLoader__.load({
       classifier: 'Classifier',
       'classifier.heuristic': 'Heuristic (zero cost, default)',
       'classifier.llm': 'LLM classifier (task and step context)',
+      'classifier.jev': 'Jev judgement (TypeSafe System One)',
       'classifier.hint': 'Heuristic is the default: zero cost and deterministic. The LLM classifier also '
-        + 'weighs the task and recent steps, at the price of one extra model call per classification.',
+        + 'weighs the task and recent steps, at the price of one extra model call per classification. '
+        + 'Jev does not generate text: it treats "which tier" as a three-option choice question and returns '
+        + 'the tier, the per-option probabilities and a confidence, so there is no reply format left to '
+        + 'misparse; the price is one HTTPS round trip of about a second (needs a TypeSafe API key). '
+        + 'All three fall back to the heuristic on failure, so a request is never blocked.',
+      'section.jev': 'Jev judgement (TypeSafe)',
+      'jev.key': 'API key',
+      'jev.key.placeholder': 'Paste the TypeSafe API key',
+      'jev.key.set': 'Configured',
+      'jev.key.unset': 'Not configured',
+      'jev.key.source.settings': 'Source: this settings page',
+      'jev.key.source.env': 'Source: TYPESAFE_API_KEY environment variable',
+      'jev.key.source.file': 'Source: ~/.typesafe/key',
+      'jev.key.save': 'Save',
+      'jev.key.clear': 'Clear',
+      'jev.key.hint': 'The key stays in this machine\'s settings; the API never echoes it back (it reports '
+        + 'only whether one is configured), so the input is always empty: leave it blank to keep the '
+        + 'current key, or paste a new one and save to replace it.',
+      'jev.model': 'Model',
+      'jev.model.hint': 'Defaults to jev-latest; there is rarely a reason to change it.',
+      'jev.minConfidence': 'Confidence floor',
+      'jev.minConfidence.hint': 'Below this confidence the judgement counts as an abstention and the '
+        + 'heuristic decides instead (0 disables the floor). A uniform distribution over three options has '
+        + 'a confidence near 0, so 0.3 rejects exactly the guesses that carry no real signal.',
       hardScore: 'Hard threshold',
       'hardScore.hint': 'A heuristic score at or above this is classified hard. Measured on 213 real '
         + 'requests from this machine, 79% scored exactly 0, so 2/3/4/5 behave identically: 3 (default) '
@@ -486,6 +530,12 @@ window.__ModuleLoader__.load({
       const [stats, setStats] = useState(null)
       const [saving, setSaving] = useState(false)
       const [saveFailed, setSaveFailed] = useState(false)
+      /**
+       * Draft of a newly pasted TypeSafe key. The stored key is never sent to
+       * the page, so this input cannot be pre-filled: it is empty until the
+       * user types something, and saving clears it again.
+       */
+      const [jevKeyDraft, setJevKeyDraft] = useState('')
       /** Newest-last decision ring from the host; rendered newest-first. */
       const decisions = (Array.isArray(stats?.decisions) ? stats.decisions : []).map((d) => ({
         at: String(d?.at ?? ''),
@@ -595,6 +645,15 @@ window.__ModuleLoader__.load({
         provider: String(value.llmClassifierProvider ?? ''),
         model: String(value.llmClassifierModel ?? ''),
       }
+      /**
+       * Where the effective Jev key comes from, as a label. Written as an
+       * explicit switch rather than a computed key (`t('jev.key.source.' + s)`)
+       * so an unknown source degrades to nothing instead of printing a raw key.
+       */
+      const jevSourceLabel = (source) => (source === 'settings' ? t('jev.key.source.settings')
+        : source === 'env' ? t('jev.key.source.env')
+          : source === 'file' ? t('jev.key.source.file')
+            : '')
       const defaultModel = catalog.defaultModel
       const groups = pickableGroups(catalog.groups)
       // Provider select for the standalone rows (vision / fallback / llm
@@ -642,6 +701,11 @@ window.__ModuleLoader__.load({
           fields.push(fieldPath(tier.key, 'provider'), fieldPath(tier.key, 'model'), fieldPath(tier.key, 'effort'))
         }
         fields.push('fallbackProvider', 'fallbackModel', 'llmClassifierProvider', 'llmClassifierModel', 'visionFallbacks', 'contextGuard')
+        // Jev's tunables go back to their defaults, but NOT `jevApiKey`: a
+        // stored credential is not a preference, and silently deleting one the
+        // user pasted would force them to fetch it again. The Clear button next
+        // to the field is the explicit way to remove it.
+        fields.push('jevModel', 'jevBaseUrl', 'jevMinConfidence')
         fields.push('classifier')
         for (const field of fields) void write(field, '')
       }
@@ -672,11 +736,12 @@ window.__ModuleLoader__.load({
             },
               h(Option, { value: 'heuristic', label: t('classifier.heuristic') }),
               h(Option, { value: 'llm', label: t('classifier.llm') }),
+              h(Option, { value: 'jev', label: t('classifier.jev') }),
             ),
           ),
           h('div', { style: S.hint }, t('classifier.hint')),
-          // The heuristic's only tuning knob. Disabled under `llm`, where the
-          // model decides and the score plays no part.
+          // The heuristic's only tuning knob. Disabled under `llm` and `jev`,
+          // where a semantic classifier decides and the score plays no part.
           h('div', { style: S.row },
             h('div', { style: { ...S.label, minWidth: 72 } }, t('hardScore')),
             h('input', {
@@ -684,7 +749,7 @@ window.__ModuleLoader__.load({
               style: { ...S.select, maxWidth: 84 },
               type: 'number', min: 0, max: 10, step: 1,
               defaultValue: value.hardScore ?? 3,
-              disabled: !writable || String(value.classifier) === 'llm',
+              disabled: !writable || String(value.classifier ?? 'heuristic') !== 'heuristic',
               onBlur: (e) => {
                 const next = Number(e.target.value)
                 if (Number.isInteger(next) && next >= 0 && next <= 10 && next !== value.hardScore) {
@@ -804,6 +869,87 @@ window.__ModuleLoader__.load({
                   modelSelect(llmValue.provider, llmValue.model, (v) => void write('llmClassifierModel', v), false),
                 ),
                 h('div', { style: S.hint }, t('llm.hint')),
+              ),
+            )
+          : null,
+
+        // ---- Jev / TypeSafe route (only relevant when it is selected) -------
+        String(value.classifier) === 'jev'
+          ? h(Fragment, {},
+              h('div', { style: S.title }, t('section.jev')),
+              h('div', { style: S.card },
+                h('div', { style: S.row },
+                  h('div', { style: { ...S.label, minWidth: 96 } }, t('jev.key')),
+                  h('input', {
+                    style: { ...S.select, maxWidth: 320, minWidth: 200 },
+                    type: 'password',
+                    autoComplete: 'off',
+                    spellCheck: false,
+                    placeholder: t('jev.key.placeholder'),
+                    value: jevKeyDraft,
+                    disabled: !writable,
+                    onChange: (e) => setJevKeyDraft(e.target.value),
+                  }),
+                  h('button', {
+                    style: S.button,
+                    disabled: !writable || jevKeyDraft.trim() === '',
+                    onClick: () => {
+                      void write('jevApiKey', jevKeyDraft.trim())
+                      setJevKeyDraft('')
+                    },
+                  }, t('jev.key.save')),
+                  value.jevKeySet === true
+                    ? h('button', {
+                        style: S.button,
+                        disabled: !writable,
+                        onClick: () => {
+                          void write('jevApiKey', null)
+                          setJevKeyDraft('')
+                        },
+                      }, t('jev.key.clear'))
+                    : null,
+                  h('span', {
+                    style: { ...S.badge, ...(value.jevKeySet === true ? S.badgeGreen : {}) },
+                  }, value.jevKeySet === true ? t('jev.key.set') : t('jev.key.unset')),
+                ),
+                // Which credential is actually in play: a key picked up from
+                // the environment or the local TypeSafe SDK file explains why
+                // the field can read "Configured" while looking empty.
+                value.jevKeySet === true && jevSourceLabel(String(value.jevKeySource ?? '')) !== ''
+                  ? h('div', { style: S.hint }, jevSourceLabel(String(value.jevKeySource ?? '')))
+                  : null,
+                h('div', { style: S.hint }, t('jev.key.hint')),
+                h('div', { style: S.row },
+                  h('div', { style: { ...S.label, minWidth: 96 } }, t('jev.model')),
+                  h('input', {
+                    key: `jevModel-${value.jevModel}`,
+                    style: { ...S.select, maxWidth: 200 },
+                    defaultValue: String(value.jevModel ?? 'jev-latest'),
+                    disabled: !writable,
+                    onBlur: (e) => {
+                      const next = e.target.value.trim()
+                      if (next !== '' && next !== String(value.jevModel ?? '')) void write('jevModel', next)
+                    },
+                  }),
+                ),
+                h('div', { style: S.hint }, t('jev.model.hint')),
+                h('div', { style: S.row },
+                  h('div', { style: { ...S.label, minWidth: 96 } }, t('jev.minConfidence')),
+                  h('input', {
+                    key: `jevMinConfidence-${value.jevMinConfidence}`,
+                    style: { ...S.select, maxWidth: 84 },
+                    type: 'number', min: 0, max: 1, step: 0.05,
+                    defaultValue: value.jevMinConfidence ?? 0.3,
+                    disabled: !writable,
+                    onBlur: (e) => {
+                      const next = Number(e.target.value)
+                      if (Number.isFinite(next) && next >= 0 && next <= 1 && next !== value.jevMinConfidence) {
+                        void write('jevMinConfidence', next)
+                      }
+                    },
+                  }),
+                ),
+                h('div', { style: S.hint }, t('jev.minConfidence.hint')),
               ),
             )
           : null,

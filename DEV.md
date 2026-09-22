@@ -37,7 +37,7 @@ dsh plugin --profile web add dsh-tier-router@0.5.0
 ## 二、日常环路
 
 ```sh
-npm test                 # 166 个用例，纯 node --test，无构建步骤
+npm test                 # 207 个用例，纯 node --test，无构建步骤
 scripts/dev-restart.sh   # 重启 dsh web，让它加载当前 checkout
 ```
 
